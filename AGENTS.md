@@ -310,6 +310,14 @@ xvfb-run -a pytest tests/ui/ -v
 - **Flatpak builder bare repo issue**: git sources in Flatpak manifests fail due to
   `safe.bareRepository=explicit` in the sandbox. Workaround: use `archive` sources
   with SHA256 instead of `git` sources.
+- **gi stub contamination in unit tests**: When multiple test modules install `sys.modules`
+  stubs for `gi.repository.*`, earlier stubs can bleed into later test files run in the
+  same process. Pattern: always declare stubs at module scope inside a `sys.modules.pop`
+  guard, and stub *all* attributes your module touches (e.g. `Gio.bus_get_sync`,
+  `Gio.BusType`, `Gio.DBusCallFlags`). Fixed for the core modules in #67.
+- **`CompanionServer.start()` global reset (fixed in #70)**: `GLOBAL_CONFIG = None`
+  inside a method creates a local variable, not a module-level reset. Always add
+  `global GLOBAL_CONFIG` before the assignment when resetting module-level state.
 
 ---
 
@@ -365,6 +373,11 @@ sudo umount /tmp/ir
 - **Dynamic Installation Carousel**: Replaced with video playback (Gtk.Video + AV1/VP9). Distribution can provide a branded video via `/etc/bootc-installer/install-video.webm`.
 - **Windows Data Slurp (Done — #22)**: Backend (`fisherman scan`, `ExtractData`, `InjectData`) and GUI wizard step (`bootc_installer/defaults/slurp.py`) are fully implemented. The step runs an async scan, presents per-user category checkboxes with size estimates, and enforces a RAM budget warning. Wallpaper extraction also runs as an always-on easter egg.
 - **Offline-first Install (Done — #16)**: `_is_offline_install()` detects live ISO mode; `additionalImageStores` passes pre-baked OCI stores from the ISO to fisherman/podman.
+- **GStreamer VP9/AV1 codec validation (landing — #72)**: Validates that required video codecs are present before playback begins, surfacing a clear error instead of a silent blank video.
+- **libpastry integration (landing — #71)**: Integrates libpastry for install-time configuration generation.
+- **QR soundtrack codes (landing — #73)**: Pre-generates QR codes for soundtrack tracks at build time so they display instantly during the installation carousel.
+- **QR Phone Companion MVP (landing — #70)**: Serves a local HTTPS companion server during install; the user can scan a QR code with their phone to follow along. `CompanionServer` in `bootc_installer/utils/phone_companion.py`.
+- **DX groups on first install (landing — #74)**: `docker`, `incus-admin`, `libvirt`, and `dialout` added to `_DEFAULT_GROUPS` in `bootc_installer/defaults/user.py` so newly-created users have full developer access from first boot without needing `ujust dx-group`.
 
 ---
 
