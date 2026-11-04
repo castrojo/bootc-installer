@@ -5,7 +5,6 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QTimeZone>
-#include <QtGlobal>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -149,15 +148,35 @@ QString systemKeyboardLayout()
 QStringList availableTimezones()
 {
     QStringList out;
-#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-    // Qt 6.9 moved the IANA ID APIs from QByteArray to QString, so the
-    // wasm build (Qt 6.9.3) needs the QString spellings while the 6.4/6.5
-    // desktop builds keep the old ones.
-    for (const QString &id : QTimeZone::availableTimeZoneIds())
-        out << id;
-#else
+#if QT_CONFIG(timezone)
     for (const QByteArray &id : QTimeZone::availableTimeZoneIds())
         out << QString::fromLatin1(id);
+#else
+    // Qt for WebAssembly is built without the timezone backend (QT_CONFIG
+    // disables it, so the IANA ID APIs do not exist there at all), and that
+    // build only renders the wizard in a browser (wasm-kde.yml). Offer a
+    // short curated list there; every desktop build uses the real database
+    // above.
+    out << QStringLiteral("UTC")
+        << QStringLiteral("America/New_York")
+        << QStringLiteral("America/Chicago")
+        << QStringLiteral("America/Denver")
+        << QStringLiteral("America/Los_Angeles")
+        << QStringLiteral("America/Anchorage")
+        << QStringLiteral("Pacific/Honolulu")
+        << QStringLiteral("America/Sao_Paulo")
+        << QStringLiteral("Europe/London")
+        << QStringLiteral("Europe/Berlin")
+        << QStringLiteral("Europe/Paris")
+        << QStringLiteral("Europe/Moscow")
+        << QStringLiteral("Africa/Cairo")
+        << QStringLiteral("Asia/Dubai")
+        << QStringLiteral("Asia/Karachi")
+        << QStringLiteral("Asia/Kolkata")
+        << QStringLiteral("Asia/Singapore")
+        << QStringLiteral("Asia/Tokyo")
+        << QStringLiteral("Australia/Sydney")
+        << QStringLiteral("Pacific/Auckland");
 #endif
     out.sort();
     return out;
@@ -165,12 +184,11 @@ QStringList availableTimezones()
 
 QString systemTimezone()
 {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-    const QString id = QTimeZone::systemTimeZone().id();
-    return id.isEmpty() ? QStringLiteral("UTC") : id;
-#else
+#if QT_CONFIG(timezone)
     const QByteArray id = QTimeZone::systemTimeZoneId();
     return id.isEmpty() ? QStringLiteral("UTC") : QString::fromLatin1(id);
+#else
+    return QStringLiteral("UTC");
 #endif
 }
 

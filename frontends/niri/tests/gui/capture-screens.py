@@ -445,6 +445,9 @@ def main():
     # blocking gate dialog on welcome. Dismiss it here: the grabs below
     # photograph the logo, and the dialog would cover it.
     root.setProperty("gatesAccepted", True)
+    # The tour overlay is page-independent: the main loop above leaves it open
+    # on the last leaf, and it would cover the logo the same way.
+    root.setProperty("tourOpen", False)
     for page, name in [(0, "welcomeBrandingLogo"), (DONE_PAGE, "doneBrandingLogo")]:
         root.setProperty("currentPage", page)
         root.setProperty("installSuccess", True)
