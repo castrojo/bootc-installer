@@ -257,6 +257,89 @@ pub fn update(app: &mut TunaInstaller, message: Message) -> Task<crate::Message>
                     app.recipe.encryption.passphrase = CAPTURE_PASSPHRASE.into();
                     app.passphrase_confirm = CAPTURE_PASSPHRASE.into();
                 }
+                // The catalog the walkthrough photographs: two leaves, the
+                // selected one needing a user and carrying a tour slide, so
+                // the image, account and tour pages all render their
+                // populated states from the same selection.
+                Page::Image => {
+                    app.catalog = crate::image_catalog::Catalog {
+                        default_image: "ghcr.io/example/capture-desktop:stable".to_string(),
+                        fallback_flatpaks: Vec::new(),
+                        leaves: vec![
+                            crate::image_catalog::ImageLeaf {
+                                name: "Capture Desktop".to_string(),
+                                description: "The photographed system.".to_string(),
+                                imgref: "ghcr.io/example/capture-desktop:stable".to_string(),
+                                needs_user_creation: true,
+                                carousel: vec![serde_json::json!({
+                                    "title": "Welcome to Capture",
+                                    "description": "Everything is where you left it.",
+                                })],
+                                flatpaks: Vec::new(),
+                            },
+                            crate::image_catalog::ImageLeaf {
+                                name: "Capture Minimal".to_string(),
+                                description: String::new(),
+                                imgref: "ghcr.io/example/capture-minimal:stable".to_string(),
+                                needs_user_creation: false,
+                                carousel: Vec::new(),
+                                flatpaks: Vec::new(),
+                            },
+                        ],
+                    };
+                    app.selected_image = Some(0);
+                    app.recipe.image = app.catalog.leaves[0].imgref.clone();
+                }
+                // Deterministic preflight lists (no localectl in CI), at a
+                // production-like density: a real `localectl list-locales`
+                // reports hundreds of rows, and the pixel gate reads a
+                // two-row list as blank (measured: 0.87% ink vs the 0.9%
+                // floor). The names are real locales, not filler.
+                Page::Language => {
+                    app.locales = [
+                        "en_US.UTF-8",
+                        "en_GB.UTF-8",
+                        "fr_FR.UTF-8",
+                        "de_DE.UTF-8",
+                        "es_ES.UTF-8",
+                        "it_IT.UTF-8",
+                        "pt_BR.UTF-8",
+                        "nl_NL.UTF-8",
+                        "ja_JP.UTF-8",
+                        "zh_CN.UTF-8",
+                    ]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                    app.selected_locale = Some(0);
+                }
+                Page::Keyboard => {
+                    app.keymaps = ["us", "gb", "fr", "de", "es", "it", "br", "jp", "ru", "cn"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                    app.selected_keymap = Some(0);
+                }
+                Page::Timezone => {
+                    app.timezones = vec![
+                        "Europe/Berlin".to_string(),
+                        "Europe/Paris".to_string(),
+                        "Europe/Rome".to_string(),
+                        "America/New_York".to_string(),
+                        "Asia/Tokyo".to_string(),
+                    ];
+                    app.tz_query = String::new();
+                }
+                // No network in the capture job: photograph the passing state.
+                Page::Network => {
+                    app.net_checking = false;
+                    app.net_online = Some(true);
+                }
+                // The pairing code without a server: capture never binds one.
+                Page::Companion => {
+                    app.companion_token = "capture-token".to_string();
+                    app.companion_port = Some(8443);
+                }
                 // Filled in through the page's own messages, so the recipe's
                 // user block is built the way typing builds it (sync_user).
                 // update() returns no task for these in capture mode: no

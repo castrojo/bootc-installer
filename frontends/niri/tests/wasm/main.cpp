@@ -25,6 +25,8 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QTimer>
+#include <QVariantList>
+#include <QVariantMap>
 
 #include <string>
 
@@ -41,14 +43,15 @@ struct Page {
 
 // The same list, in the same order, as PAGES in capture-screens.py.
 const Page kPages[] = {
-    {"01-welcome", 0}, {"02-disk", 1},     {"03-encryption", 2},
-    {"04-account", 3}, {"05-confirm", 4},  {"06-progress", 5},
-    {"07-done", 6},    {"08-recovery", 6},
+    {"01-welcome", 0}, {"02-session", 1},  {"03-source", 2},
+    {"04-disk", 3},    {"05-encryption", 4}, {"06-account", 5},
+    {"07-confirm", 6}, {"08-progress", 7},  {"09-done", 8},
+    {"10-recovery", 8}, {"11-tour", 8},
 };
 
 // Page positions by role, as PROGRESS_PAGE / DONE_PAGE in capture-screens.py.
-constexpr int kProgressPage = 5;
-constexpr int kDonePage = 6;
+constexpr int kProgressPage = 7;
+constexpr int kDonePage = 8;
 
 // The account fields, filled as ACCOUNT in capture-screens.py, so the
 // account and confirm frames show a user.
@@ -201,8 +204,23 @@ std::string niriShow(const std::string &wanted)
     }
     if (page->index == kDonePage)
         root->setProperty("installSuccess", true);
-    if (name == QLatin1String("08-recovery"))
+    if (name == QLatin1String("10-recovery"))
         appendLog(root, QString::fromLatin1(kRecoveryEvent));
+    if (name == QLatin1String("11-tour")) {
+        // The tour overlay reads the selected leaf's carousel slides, as the
+        // capture harness's BETA leaf does.
+        QVariantMap leaf;
+        QVariantMap slide;
+        slide.insert(QStringLiteral("title"), QStringLiteral("Welcome"));
+        slide.insert(QStringLiteral("description"), QStringLiteral("This is the tour."));
+        slide.insert(QStringLiteral("image"), QStringLiteral(""));
+        leaf.insert(QStringLiteral("carousel"), QVariantList{slide});
+        root->setProperty("selectedLeaf", leaf);
+        root->setProperty("tourIndex", 0);
+        root->setProperty("tourOpen", true);
+    } else {
+        root->setProperty("tourOpen", false);
+    }
     confirmAfterFrame(name, settleMs);
     return "ok";
 }
@@ -220,9 +238,9 @@ std::string niriState()
         const QString text = acc.join(QLatin1Char(' '));
         state.insert("text", text);
         QJsonObject checks;
-        if (g_current == QLatin1String("06-progress"))
+        if (g_current == QLatin1String("08-progress"))
             checks.insert("progress-bar", progressCheck());
-        if (g_current == QLatin1String("08-recovery"))
+        if (g_current == QLatin1String("10-recovery"))
             checks.insert("recovery-key", recoveryCheck(g_window, text));
         state.insert("checks", checks);
     }

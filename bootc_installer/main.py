@@ -83,6 +83,50 @@ logger_boot.info("All imports done")
 logger = logging.getLogger("Installer::Main")
 
 
+def _arm_readiness_frame_gated(win, app_id):
+    """Stamp readiness only after the window maps AND a frame paints.
+
+    Niri's frame-swapped stamp (frontends/niri/installer/readiness.go)
+    fires on QQuickWindow::frameSwapped — proof a frame reached the
+    compositor, strictly stronger than "the widget mapped". GTK exposes no
+    present-confirmation, so the closest GTK equivalent is map plus the
+    frame clock's first after-paint: a mapped-but-never-drawn window (the
+    COSMIC-leg failure mode) writes no stamp, while a window whose toolkit
+    never realises one still stamps on map alone.
+
+    Lives here, not in bootc_installer/readiness.py: that file is the
+    byte-identical shared copy enforced by
+    tests/unit/test_shared_readiness.py, and this gating changes no shared
+    semantics — map and the stamp format are untouched.
+    """
+    state = {"mapped": False, "painted": False, "stamped": False}
+
+    def _maybe_stamp(widget):
+        if state["stamped"] or not (state["mapped"] and state["painted"]):
+            return
+        state["stamped"] = True
+        readiness.write_stamp(app_id, type(widget).__name__)
+
+    def _on_after_paint(_clock):
+        state["painted"] = True
+        _maybe_stamp(win)
+
+    def _on_map(widget):
+        state["mapped"] = True
+        try:
+            clock = widget.get_frame_clock()
+        except AttributeError:
+            clock = None
+        if clock is None:
+            # Never realised far enough to own a frame clock: fall back to
+            # plain map semantics rather than staying silent forever.
+            state["painted"] = True
+        else:
+            clock.connect("after-paint", _on_after_paint)
+        _maybe_stamp(widget)
+
+    win.connect("map", _on_map)
+
 
 class BootcInstaller(Adw.Application):
     """The main application singleton class."""
@@ -154,7 +198,7 @@ class BootcInstaller(Adw.Application):
         # UEFI windows above, any of which a CI VM can land on while every
         # check passes. The stamp names the class, so the smoke test can
         # require the wizard rather than merely a window.
-        readiness.arm(win, self.props.application_id)
+        _arm_readiness_frame_gated(win, self.props.application_id)
 
         win.present()
 

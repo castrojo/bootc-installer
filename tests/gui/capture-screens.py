@@ -19,6 +19,20 @@ GTK4 has no offscreen backend, so a real X display is required:
     BOOTC_RESOURCE=build/bootc_installer/bootc-installer.gresource \\
         xvfb-run -a python3 tests/gui/capture-screens.py [outdir]
 
+GPU-less-capture delta vs the KDE harness (frontends/kde/tests/capture.cpp):
+Qt has an offscreen platform plugin, so KDE renders on a stock runner with
+no display server at all. GTK4 removed its offscreen backend, and the
+WidgetPaintable snapshot below needs a realised native surface, so this
+script still needs *some* X server — Xvfb on a stock runner, or an existing
+DISPLAY (``just capture`` skips xvfb-run when one is already set). A
+faithful offscreen port is therefore infeasible; this is the closest
+equivalent. The other half of the KDE approach — emitting walkthrough JSON
+from the widget tree instead of OCR — was already shared: ``_page_text``
+reads the visible page's widget tree and ``parity_report.write_report``
+writes the same shape (``ocr: false``, ``text_source: widget-tree``,
+``activation_key: null``) as KDE's parity_report.h states for its QML
+item-tree text.
+
 Nothing here touches a disk. The disks come from the shared probe fixture,
 the QR companion server never binds a port, and ``BootcProgress.start`` --
 the one method that launches fisherman -- is replaced with a guard that fails
@@ -238,6 +252,14 @@ def _page_text(widget, acc=None):
         acc.append(buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False) or "")
     if isinstance(widget, Adw.PreferencesRow):
         acc.append(widget.get_title() or "")
+    if isinstance(widget, Adw.ComboRow):
+        # The selected choice (the encryption type): a row title alone does
+        # not name it, so without this the report cannot tell the four
+        # types apart on the page that offers them.
+        item = widget.get_selected_item()
+        get_string = getattr(item, "get_string", None)
+        if callable(get_string):
+            acc.append(get_string() or "")
     if isinstance(widget, Adw.ActionRow):
         acc.append(widget.get_subtitle() or "")
     if isinstance(widget, Adw.PreferencesGroup):
@@ -371,6 +393,13 @@ def _seed(win, page, name):
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, "docs", "screenshots")
+    # GTK4 has no offscreen backend (see the module docstring): without any
+    # display server the failure below would be an obscure Gtk init error.
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        print("capture-screens.py: no DISPLAY or WAYLAND_DISPLAY; run under "
+              "Xvfb (`just capture`) or with a display server running",
+              file=sys.stderr)
+        return 2
     os.makedirs(out, exist_ok=True)
     for stale in os.listdir(out):
         if stale.endswith(".png") or stale == "walkthrough.gif":

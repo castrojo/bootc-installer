@@ -24,8 +24,17 @@ backend. The plainest of the TunaOS installer frontends by design — see
 
 ## Flow
 
-Welcome → Source (image catalog, offline badges, live-ISO self-install) →
-Destination → Filesystem & encryption → Identity → Confirm → Progress → Done.
+Welcome (with a tour of the image families) → Source (image catalog,
+offline badges, live-ISO self-install) → Destination → Filesystem &
+encryption → Identity (account, language and region, phone companion) →
+Confirm (connectivity gate when the image must be downloaded) → Progress →
+Done (install-log viewer on failure, power off / restart).
+
+Below-minimum machines never reach the wizard: a blocking RAM, CPU or UEFI
+gate shows first, with Continue anyway (relaunch ignoring the check) or
+Power off. Closing the window mid-install asks first and cancels the
+running fisherman on confirm. `--autoinstall RECIPE_JSON` skips the wizard
+entirely and installs straight from the file.
 
 Offline installs: detects live-ISO mode via `bootc status` (empty `image` in
 the recipe installs the running system) and probes embedded OCI stores

@@ -182,6 +182,94 @@ TunaComponents.SetupModule {
                 }
             }
 
+            // A first look at the installed system (the GNOME tour step):
+            // the selected catalog image's carousel slides. Title and
+            // description travel; the artwork does not — the manifest names
+            // GNOME GResource paths (resource:///...), which nothing here
+            // can resolve, so slides show without it rather than not at all.
+            // Hidden without a catalog selection that names slides.
+            ColumnLayout {
+                id: tourCarousel
+                objectName: "tourCarousel"
+                visible: InstallerController.succeeded && InstallerController.tourSlides.length > 0
+                spacing: Kirigami.Units.smallSpacing
+
+                Layout.fillWidth: true
+                Layout.maximumWidth: root.cardWidth
+                Layout.alignment: Qt.AlignHCenter
+                Layout.topMargin: Kirigami.Units.largeSpacing
+
+                property int tourIndex: 0
+                readonly property var slide: InstallerController.tourSlides[tourIndex] ?? {}
+                readonly property string slideTitle: (slide["title"] ?? "") + ""
+                readonly property string slideDescription: ((slide["description"] ?? slide["desc"]) ?? "") + ""
+
+                Label {
+                    text: "Take a tour"
+                    font.bold: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+
+                    Layout.fillWidth: true
+                }
+
+                Label {
+                    text: tourCarousel.slideTitle
+                    visible: text.length > 0
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+
+                    Layout.fillWidth: true
+                }
+
+                Label {
+                    text: tourCarousel.slideDescription
+                    visible: text.length > 0
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    opacity: 0.8
+
+                    Layout.fillWidth: true
+                }
+
+                RowLayout {
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Layout.alignment: Qt.AlignHCenter
+
+                    Button {
+                        text: "Previous"
+                        icon.name: "arrow-left-symbolic"
+                        enabled: tourCarousel.tourIndex > 0
+                        onClicked: tourCarousel.tourIndex--
+                    }
+
+                    Label {
+                        text: (tourCarousel.tourIndex + 1) + " of " + InstallerController.tourSlides.length
+                        color: Kirigami.Theme.disabledTextColor
+
+                        Layout.leftMargin: Kirigami.Units.smallSpacing
+                        Layout.rightMargin: Kirigami.Units.smallSpacing
+                    }
+
+                    Button {
+                        text: "Next"
+                        icon.name: "arrow-right-symbolic"
+                        enabled: tourCarousel.tourIndex < InstallerController.tourSlides.length - 1
+                        onClicked: tourCarousel.tourIndex++
+                    }
+                }
+
+                // A new leaf resets the index: slides from the previous
+                // image must not page through the new one's count.
+                Connections {
+                    target: InstallerController
+                    function onCatalogChanged(): void {
+                        tourCarousel.tourIndex = 0;
+                    }
+                }
+            }
+
             // Restart is the primary action after a successful install, the
             // same as on the other frontends; Close stays in the footer.
             Button {
@@ -202,6 +290,9 @@ TunaComponents.SetupModule {
             // The log shown on the previous step dies with this window; this
             // is where the copy on disk is. Hidden when the file could not be
             // opened, rather than pointing at a path that does not exist.
+            // The button copies the in-window log for a bug report (the GNOME
+            // BootcDialogOutput copy action); the label says where the file
+            // is for later.
             Label {
                 text: "Log saved to " + InstallerController.logPath
                 visible: InstallerController.logPath.length > 0
@@ -212,6 +303,16 @@ TunaComponents.SetupModule {
                 opacity: 0.8
 
                 Layout.fillWidth: true
+            }
+
+            Button {
+                objectName: "copyLogButton"
+                text: "Copy install log"
+                icon.name: "edit-copy-symbolic"
+                visible: InstallerController.logPath.length > 0
+                onClicked: InstallerController.copyLogToClipboard()
+
+                Layout.alignment: Qt.AlignHCenter
             }
 
         }

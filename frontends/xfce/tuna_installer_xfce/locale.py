@@ -1,0 +1,158 @@
+"""Locale, keyboard, timezone and connectivity checks.
+
+GTK-free helpers behind the Identity page's "Language and region" controls,
+mirroring what GNOME spreads across defaults/language.py, keyboard.py,
+timezone.py, network.py and conn_check.py:
+
+- GNOME's language/keyboard/timezone steps collect finals that its processor
+  drops before fisherman ever sees them (processor.py reads only disk,
+  encryption, image, hostname and flatpaks out of the merged finals). What
+  those steps DO is apply the choice to the live session -- keyboard layout
+  first of all, so the passphrase the person types is the one they meant.
+  This module does the same: enumerate what the live system offers, report
+  what it currently uses, and apply a keyboard layout best-effort. Nothing
+  here writes a recipe key fisherman's schema was never shown to accept.
+- GNOME's conn_check page auto-advances past itself when the install is
+  offline (live media with a baked image) and otherwise blocks until
+  ghcr.io:443 or 8.8.8.8:53 answers. has_connectivity() is that probe as a
+  plain function; needs_network() is the "otherwise" condition.
+
+Every external command has a fallback that needs no daemon: localectl and
+timedatectl are absent from minimal live media, and this module must still
+offer something on a system that has neither.
+"""
+
+import locale
+import os
+import socket
+import subprocess
+
+# A network check the screenshot harness must be able to skip: without it the
+# capture would stall on the confirm page in a sandbox with no route out.
+# VANILLA_SKIP_CONN_CHECK is GNOME conn_check.py's own name; the longer one
+# is this frontend's, so a harness written against either works.
+SKIP_ENV_VARS = ("TUNA_INSTALLER_SKIP_CONN_CHECK", "VANILLA_SKIP_CONN_CHECK")
+
+
+def _run(argv, timeout=10):
+    """argv's stdout lines, or [] when it cannot run (missing binary, no
+    daemon, non-zero exit). A locale control must degrade, never raise."""
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True,
+                             timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if out.returncode != 0:
+        return []
+    return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+
+def available_languages():
+    """Locale names the live system can switch to (`localectl
+    list-locales`), or a short built-in list where localectl is absent."""
+    found = _run(["localectl", "list-locales", "--no-pager"])
+    if found:
+        return found
+    return ["C", "en_US.UTF-8"]
+
+
+def current_language():
+    """The session's locale (LANG, else LC_ALL), or en_US.UTF-8."""
+    for var in ("LC_ALL", "LANG"):
+        value = os.environ.get(var, "")
+        if value:
+            return value
+    name, _enc = locale.getlocale()
+    if name and name != "C":
+        return name + ".UTF-8"
+    return "en_US.UTF-8"
+
+
+def available_keyboard_layouts():
+    """X11 layouts localectl knows, or the layouts a decade-old laptop most
+    plausibly has (DESIGN.md's brief) where it knows none."""
+    found = _run(["localectl", "list-x11-keymap-layouts", "--no-pager"])
+    if found:
+        return found
+    return ["us", "gb", "de", "fr", "es", "it", "pt", "br", "ru", "pl",
+            "cz", "se", "no", "dk", "fi", "hu", "gr", "tr", "ua", "il",
+            "ara", "jp", "cn"]
+
+
+def current_keyboard_layout():
+    """The live session's layout (`setxkbmap -query`), or "us"."""
+    for line in _run(["setxkbmap", "-query"]):
+        key, _, value = line.partition(":")
+        if key.strip() == "layout":
+            return value.strip().split(",")[0].strip() or "us"
+    return "us"
+
+
+def apply_keyboard_layout(layout):
+    """Switch the live session to `layout` so typed passphrases match what
+    the installed system will read. Best-effort: False, never an exception,
+    when setxkbmap is absent (Wayland live media) or refuses."""
+    try:
+        out = subprocess.run(["setxkbmap", layout], capture_output=True,
+                             timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return out.returncode == 0
+
+
+def available_timezones():
+    """Zone names from timedatectl, or the zoneinfo tree where the daemon is
+    absent. Directory entries (regions) are skipped; only zones are offered."""
+    found = _run(["timedatectl", "list-timezones", "--no-pager"], timeout=15)
+    if found:
+        return found
+    zones = []
+    base = "/usr/share/zoneinfo"
+    for root, _dirs, files in os.walk(base):
+        for name in files:
+            rel = os.path.relpath(os.path.join(root, name), base)
+            if "/" in rel and not rel.startswith(("posix", "right")):
+                zones.append(rel)
+    return sorted(zones)
+
+
+def current_timezone():
+    """The live session's zone: /etc/localtime's target, else UTC."""
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        return "UTC"
+    marker = "/zoneinfo/"
+    if marker in target:
+        return target.split(marker, 1)[1]
+    return "UTC"
+
+
+def has_connectivity(timeout=5):
+    """Whether an install image could be downloaded right now: ghcr.io:443
+    first (the registry bootc images come from), then 8.8.8.8:53 as a plain
+    connectivity probe. Either skipping env var forces True for harnesses
+    with no route out. Mirrors defaults/conn_check.py's async_fn."""
+    if any(os.environ.get(var) not in (None, "", "0")
+           for var in SKIP_ENV_VARS):
+        return True
+    for host, port in (("ghcr.io", 443), ("8.8.8.8", 53)):
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout)
+        except OSError:
+            continue
+        sock.close()
+        return True
+    return False
+
+
+def needs_network(offline_install):
+    """Whether the install must download anything: False on live media or
+    when the selected image is already in the host's stores (GNOME's
+    conn_check.should_show inverted -- that page shows when True)."""
+    return not offline_install
+
+
+def is_uefi():
+    """Whether the machine booted in UEFI mode."""
+    return os.path.exists("/sys/firmware/efi")

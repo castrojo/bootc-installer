@@ -71,10 +71,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Commands:")
 		fmt.Fprintln(os.Stderr, "  discover-disks     List the disks fisherman offers as JSON")
 		fmt.Fprintln(os.Stderr, "  detect             Report live media, offline images, TPM, requirements and encryption choices as JSON")
+		fmt.Fprintln(os.Stderr, "  catalog            List the images.json catalog leaves with inheritance resolved as JSON")
+		fmt.Fprintln(os.Stderr, "  session-get        Report the live session's keyboard, locale, timezone and connectivity as JSON")
+		fmt.Fprintln(os.Stderr, "  session-set        Apply keyboard/locale/timezone JSON read from stdin to the live session")
 		fmt.Fprintln(os.Stderr, "  install            Run fisherman with the recipe JSON read from stdin")
+		fmt.Fprintln(os.Stderr, "  cancel             Stop a running install (the progress page's Cancel, the window's close)")
+		fmt.Fprintln(os.Stderr, "  log-path           Print the persistent install log file dialog_output.py shows")
 		fmt.Fprintln(os.Stderr, "  validate           Check a partial recipe from stdin with fisherman validate --json --partial")
 		fmt.Fprintln(os.Stderr, "  readiness [page]   Record that the UI window presented a frame")
 		fmt.Fprintln(os.Stderr, "  reboot             Restart the host (the done page's action)")
+		fmt.Fprintln(os.Stderr, "  poweroff           Power the host off (the requirements gate's action)")
+		fmt.Fprintln(os.Stderr, "  firmware           Reboot into the firmware setup (the UEFI gate's remediation)")
 		os.Exit(1)
 	}
 
@@ -83,6 +90,16 @@ func main() {
 		discoverDisks()
 	case "detect":
 		detectEnvironment()
+	case "catalog":
+		catalogMain()
+	case "session-get":
+		sessionGetMain()
+	case "session-set":
+		sessionSetMain()
+	case "cancel":
+		cancelMain()
+	case "log-path":
+		logPathMain()
 	case "install":
 		// The recipe may hold a LUKS passphrase; read it from stdin rather
 		// than argv so it never shows up in /proc/PID/cmdline (world-readable
@@ -99,11 +116,12 @@ func main() {
 		validateMain()
 	case "reboot":
 		// The done page's Restart. On the host through flatpak-spawn when
-		// sandboxed, like every other frontend's reboot path.
-		if out, err := runHost("systemctl", "reboot"); err != nil {
-			fmt.Fprintf(os.Stderr, "reboot: %v\n%s", err, out)
-			os.Exit(1)
-		}
+		// sandboxed, like every other frontend's reboot path (power.go).
+		rebootMain()
+	case "poweroff":
+		poweroffMain()
+	case "firmware":
+		firmwareMain()
 	case "readiness":
 		// Called by the QML layer from ApplicationWindow.onFrameSwapped. See
 		// readiness.go for why the write lives on this side of the boundary.
@@ -168,6 +186,9 @@ func detectEnvironment() {
 		// hostname seed, distroID and default image from here; nothing in
 		// the frontend names a product.
 		"branding": resolveBranding(),
+		// The persistent install log dialog_output.py shows: the QML
+		// names it next to its Copy button ("log-path" prints the same).
+		"logPath": installLogDisplayPath(),
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -269,6 +290,12 @@ func runInstall(recipeJSON string) {
 
 	runErr := cmd.Start()
 	if runErr == nil {
+		// The wrapper's pid, so `cancel` (the progress page's Cancel,
+		// the window's close) can kill its process group. Removed when
+		// the install ends either way (defer in the log branch below
+		// cannot cover the early exit without a log).
+		writePidfile(cmd.Process.Pid)
+		defer clearPidfile()
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 		go forwardSignals(cmd.Process.Pid, sigs)

@@ -37,6 +37,12 @@ struct Recipe {
         // The first user administers the machine, as on every frontend.
         QStringList groups{QStringLiteral("wheel")};
     } user;
+    // False when the selected image creates its own first user
+    // (needs_user_creation in the catalog, mirrored from the GNOME image step
+    // and the XFCE IdentityPage): the `user` block is then omitted even with
+    // a typed username, the way the XFCE build_recipe omits it. Defaults to
+    // true — no catalog means the account step is required, as before.
+    bool userRequired = true;
     // fisherman's probe says the host booted from live media: an empty image
     // installs the running system, and is left out of the JSON.
     bool liveMode = false;

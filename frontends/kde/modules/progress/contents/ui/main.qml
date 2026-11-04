@@ -41,6 +41,18 @@ TunaComponents.SetupModule {
 
                 Layout.fillWidth: true
             }
+
+            // Stops the install: terminate the wrapper, kill it if it does
+            // not go (fisherman exits when its parent dies). The wizard
+            // advances to the done step on its own when the process exits,
+            // which then reports the cancelled run.
+            Button {
+                objectName: "cancelInstallButton"
+                text: "Cancel"
+                icon.name: "dialog-cancel-symbolic"
+                visible: InstallerController.installing && !InstallerController.installFinished
+                onClicked: InstallerController.cancelInstall()
+            }
         }
 
         // The install's real position, from fisherman's progress protocol

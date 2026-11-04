@@ -53,9 +53,14 @@ KDE KISS's `SetupModule`, so the shape is upstream's — follow it when adding a
 step rather than inventing a new one.
 
 Steps: welcome → disk → encryption → account → confirm → progress → done.
-The account step writes the recipe's `user` block (groups `["wheel"]`)
-and is required: there is no image catalog here to say an image creates
-its own first user.
+The disk step offers the image catalog (fisherman's `images.json`, resolved
+like the GNOME/XFCE frontends resolve it) when a manifest is installed and
+the host is not live media. The account step writes the recipe's `user`
+block (groups `["wheel"]`) and is required unless the selected image creates
+its own first user (`needs_user_creation`), in which case the wizard skips
+the step and the recipe omits the block. The welcome step also carries the
+hardware gates, the region & language pickers and the connectivity check;
+see DESIGN.md's GNOME parity notes for the mapping.
 
 ### QML gotchas already paid for
 

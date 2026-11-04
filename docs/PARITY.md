@@ -24,10 +24,10 @@ claimed a render that nobody had wired up.
 |---|---|---|---|---|---|
 | `welcome_title` | page header | heading | title1 | heading | page title |
 | `welcome_subtitle` | header subtitle, hidden | label, hidden | body, hidden | label, hidden | label, hidden |
-| `welcome_install` | install row title | no (own body text) | no (no install row) | no (no install row) | live-system radio |
-| `welcome_install_subtitle` | install row subtitle | no | no | no | live-system radio subtitle |
+| `welcome_install` | install row title | no (own body text) | no (no install row) | live-system row | live-system radio |
+| `welcome_install_subtitle` | install row subtitle | no | no | live-system row subtitle | live-system radio subtitle |
 | `welcome_button` | no (row activates, own label) | Next button on welcome | forward button | button | Next button on welcome |
-| `requirements_title` | gate window text (blocks) | welcome inline message | welcome warning row | welcome warning | welcome warning row |
+| `requirements_title` | gate window text (blocks) | welcome inline message | welcome warning row | gate dialog (blocks) | welcome warning row |
 | `requirements_ram` | RAM gate window text | welcome inline message line | welcome warning row line | welcome warning line | welcome warning row line |
 | `requirements_cpu` | CPU gate window text | welcome inline message line | welcome warning row line | welcome warning line | welcome warning row line |
 | `requirements_uefi` | UEFI gate window text | welcome inline message line | welcome warning row line | welcome warning line | welcome warning row line |

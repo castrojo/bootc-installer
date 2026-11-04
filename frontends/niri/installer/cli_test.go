@@ -175,7 +175,7 @@ func TestDetectEmitsTheEnvironmentContract(t *testing.T) {
 		t.Fatalf("stdout is not the JSON object the frontend parses: %v\n%s", err, got.stdout)
 	}
 	for _, key := range []string{"isLive", "liveImage", "offlineImages", "hasTpm", "unmet",
-		"encryptionChoices", "branding"} {
+		"encryptionChoices", "branding", "logPath"} {
 		if _, ok := env[key]; !ok {
 			t.Errorf("detect output is missing the %q key; got %v", key, env)
 		}

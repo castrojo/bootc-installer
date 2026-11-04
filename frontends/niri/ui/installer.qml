@@ -162,14 +162,34 @@ ApplicationWindow {
     }
 
     // Wizard state
-    property int currentPage: 0 // 0=welcome, 1=disk, 2=encryption, 3=account, 4=confirm, 5=progress, 6=done
-    readonly property var pageNames: ["Welcome", "Disk", "Encryption", "Account", "Confirm", "Installing", "Done"]
+    // 0=welcome, 1=session, 2=source, 3=disk, 4=encryption, 5=account,
+    // 6=confirm, 7=progress, 8=done. The account page is skipped when the
+    // selected image makes its own first user (needs_user_creation), via
+    // flowPages below — currentPage still names the StackLayout child.
+    property int currentPage: 0
+    readonly property var pageNames: ["Welcome", "Session", "Source", "Disk", "Encryption", "Account", "Confirm", "Installing", "Done"]
+
+    // The pages the user actually steps through. The account page drops
+    // out when the catalog leaf says the image creates its own user
+    // (XFCE's needs_user_creation, bootc_installer/defaults/image.py),
+    // instead of asking for an account fisherman would then ignore.
+    readonly property var flowPages: root.needsUserCreation ? [0, 1, 2, 3, 4, 5, 6, 7, 8] : [0, 1, 2, 3, 4, 6, 7, 8]
+    readonly property int flowPos: Math.max(0, root.flowPages.indexOf(root.currentPage))
+    readonly property int flowCount: root.flowPages.length
+    function flowNext() {
+        const next = Math.min(root.flowPos + 1, root.flowCount - 1)
+        root.currentPage = root.flowPages[next]
+    }
+    function flowBack() {
+        const prev = Math.max(root.flowPos - 1, 0)
+        root.currentPage = root.flowPages[prev]
+    }
 
     // Slugs for the readiness stamp. Kept in the same order as currentPage
     // above, and matching the names the other frontends use so the tunaOS
     // screen contract reads one vocabulary rather than five.
     function pageSlug(i) {
-        const slugs = ["welcome", "disk", "encryption", "account", "confirm", "installing", "done"]
+        const slugs = ["welcome", "session", "source", "disk", "encryption", "account", "confirm", "installing", "done"]
         return (i >= 0 && i < slugs.length) ? slugs[i] : "unknown"
     }
     // Encryption was previously hardcoded to "none" in the recipe with no UI,
@@ -210,6 +230,7 @@ ApplicationWindow {
             .filter(l => l !== "").join("\n")
     }
     property var selectedDisk: ({})
+    property bool hostnameTouched: false
     property string hostname: branding.defaultHostname || "linux"
     // The account fisherman creates: the recipe's `user` block. Required:
     // this frontend has no image catalog to say an image makes its own first
@@ -269,6 +290,9 @@ ApplicationWindow {
     // fisherman's to find: the recipe leaves additionalImageStores out.
     property bool isLive: false
     property string liveImage: ""
+    // fisherman's offline.images: what needs no download. Joined against
+    // the catalog here (sortedLeaves, isOffline), never sent anywhere.
+    property var offlineImages: []
 
     // fisherman's answer to `validate --json --partial` for the fields the
     // wizard has (hostname, encryption): {field: problem}. The rules are
@@ -286,23 +310,115 @@ ApplicationWindow {
     readonly property string usernameProblem: problemText("user.username")
     readonly property string encryptionProblem:
         problemText("encryption.passphrase") || problemText("encryption.type")
+    // fisherman's filesystem rule (LUKS on ZFS, composefs needing
+    // ext4-or-btrfs): the Advanced section's choice, checked live.
+    readonly property string filesystemProblem: problemText("filesystem")
     property string pendingValidate: ""
     property bool validateAgain: false
     function partialRecipe() {
         const enc = { type: root.encType }
         if (root.needsPassphrase(root.encType)) enc.passphrase = root.passphrase
-        return { hostname: root.hostname, filesystem: "xfs", encryption: enc,
-                 user: { username: root.username } }
+        // XFCE's build_recipe rules: btrfsSubvolumes only means anything
+        // on btrfs, and the user block is omitted when the image makes
+        // its own first user (the schema's "empty skips" would drop a
+        // block with no username anyway).
+        const recipe = { hostname: root.hostname, filesystem: root.filesystem,
+            btrfsSubvolumes: root.filesystem === "btrfs" && root.btrfsSubvolumes,
+            encryption: enc, image: root.selectedImage }
+        if (root.needsUserCreation)
+            recipe.user = { username: root.username }
+        return recipe
     }
     function checkFields() { validateTimer.restart() }
     onHostnameChanged: checkFields()
     onPassphraseChanged: checkFields()
     onEncTypeChanged: checkFields()
     onUsernameChanged: checkFields()
+    onFilesystemChanged: checkFields()
+    onBtrfsSubvolumesChanged: checkFields()
+    onSelectedImageChanged: checkFields()
     // The image installed off a live ISO: branding.json's default_image.
     // Empty means the backend refuses ("image is required") rather than
     // installing somebody else's product.
     readonly property string defaultImage: branding.defaultImage || ""
+
+    // Filesystem (XFCE SetupPage parity). The default follows the selected
+    // catalog leaf until the user picks one in Advanced; the recipe and the
+    // confirm summary read this, never a literal.
+    readonly property var filesystems: ["xfs", "ext4", "btrfs", "zfs"]
+    property string filesystem: "xfs"
+    property bool fsChosen: false
+    property bool btrfsSubvolumes: false
+    function showFilesystem(fs) {
+        if (root.filesystems.indexOf(fs) === -1 && fs !== "")
+            return
+        root.filesystem = fs || "xfs"
+    }
+
+    // Image catalog (`catalog` subcommand, XFCE SourcePage parity). The
+    // offline mark is the probe's offline.images joined here, so the
+    // backend stays runnable with no probe and no network.
+    property var catalogLeaves: []
+    property string catalogDefaultImage: ""
+    property bool catalogLoaded: false
+    property string catalogError: ""
+    property var selectedLeaf: null
+    property bool selectedLive: false
+    readonly property var sortedLeaves: {
+        const off = root.offlineImages || []
+        return (root.catalogLeaves || []).slice().sort((a, b) =>
+            ((off.indexOf(b.imgref) !== -1) - (off.indexOf(a.imgref) !== -1))
+            || String(a.name).localeCompare(String(b.name)))
+    }
+    function isOffline(imgref) { return (root.offlineImages || []).indexOf(imgref) !== -1 }
+    // Whether the wizard asks for an account: the leaf's
+    // needs_user_creation (XFCE's win.needs_user_creation), defaulting to
+    // true the way the manifest does — an unknown image still gets a user.
+    readonly property bool needsUserCreation:
+        !root.selectedLeaf || root.selectedLeaf.needs_user_creation !== false
+    readonly property string selectedImage: {
+        if (root.isLive && root.selectedLive) return ""
+        if (root.selectedLeaf && root.selectedLeaf.imgref) return root.selectedLeaf.imgref
+        return root.catalogDefaultImage || root.defaultImage
+    }
+    readonly property bool sourceReady: (root.isLive && root.selectedLive) || root.selectedImage !== ""
+
+    // Live-session preflight (`session-get` / `session-set`, GNOME
+    // defaults/* parity for the live session only — the recipe has no
+    // locale keys, and PARITY.md keeps them GNOME-only by design).
+    property var keyboardLayouts: []
+    property string keyboardLayout: ""
+    property var localeList: []
+    property string localeName: ""
+    property var timezoneList: []
+    property string timezoneName: ""
+    property bool netConnected: false
+    property bool sessionLoaded: false
+    property string sessionError: ""
+    readonly property var keyboardModel: root.keyboardLayouts.length > 0 ? root.keyboardLayouts : ["us", "de", "fr", "es", "uk"]
+    readonly property var localeModel: root.localeList.length > 0 ? root.localeList : ["en_US.UTF-8", "de_DE.UTF-8", "fr_FR.UTF-8", "es_ES.UTF-8"]
+    readonly property var timezoneModel: root.timezoneList.length > 0 ? root.timezoneList : ["UTC", "Europe/Berlin", "Europe/Paris", "America/New_York"]
+    property string pendingSession: ""
+
+    // Requirements gates (GNOME window_cpu/window_ram/window_unsupported
+    // parity). The welcome page no longer warns inline: an unmet
+    // requirement blocks there until the user accepts it (RAM/CPU) — UEFI
+    // cannot be accepted, only powered off or rebooted into firmware.
+    property bool gatesAccepted: false
+    readonly property bool gateOpen: root.currentPage === 0 && root.unmet.length > 0 && !root.gatesAccepted
+    readonly property bool gateUefi: root.unmet.indexOf("uefi") !== -1
+    property bool powerOpen: false
+
+    // Tour (views/tour.py parity): the selected leaf's carousel slides, if
+    // any. Empty means no tour — the done page hides its button, and the
+    // wizard never promises artwork nobody shipped.
+    readonly property var tourSlides: (root.selectedLeaf && root.selectedLeaf.carousel) || []
+    property bool tourOpen: false
+    property int tourIndex: 0
+
+    // The persistent install log (dialog_output.py parity): `detect`'s
+    // logPath, named on the progress page next to its Copy button.
+    property string logPath: ""
 
     Component.onCompleted: detectProc.running = true
 
@@ -319,6 +435,16 @@ ApplicationWindow {
     // gap this closes. frameSwapped means Qt swapped a frame to the
     // compositor, which is the strongest claim of the five frontends.
     //
+    // Cancelling on exit (window_cpu/window_ram parity is the gate; this
+    // is the other half of stopping): closing mid-install kills the
+    // wrapper's process group via `cancel` instead of orphaning fisherman
+    // while its SIGHUP forwarding is still only best-effort.
+    onClosing: (close) => {
+        if (root.currentPage === 7 && installProc.running)
+            cancelProc.running = true
+        close.accepted = true
+    }
+
     // Fires on every frame, so `stamped` makes it a one-shot: this spawns a
     // process, and doing that at 60Hz would be its own bug.
     property bool stamped: false
@@ -345,6 +471,8 @@ ApplicationWindow {
                     root.liveImage = facts.liveImage || ""
                     root.hasTpm = facts.hasTpm === true
                     root.unmet = facts.unmet || []
+                    if (facts.offlineImages) root.offlineImages = facts.offlineImages
+                    if (facts.logPath !== undefined) root.logPath = facts.logPath
                     if (facts.encryptionChoices) root.encryptionChoices = facts.encryptionChoices
                     if (facts.branding) root.branding = facts.branding
                 } catch (e) { /* detect is best-effort */ }
@@ -408,6 +536,127 @@ ApplicationWindow {
         }
     }
 
+    // Image catalog for the Source step (`catalog` subcommand): leaves
+    // with inheritance resolved. Empty is not an error — the wizard falls
+    // back to the branding default image, the live-ISO norm.
+    Process {
+        id: catalogProc
+        command: [root.backendBin, "catalog"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    const doc = JSON.parse(text)
+                    const leaves = doc.leaves || []
+                    root.catalogLeaves = leaves
+                    root.catalogDefaultImage = doc.default_image || ""
+                    // GTK's first radio is active from the start; the QML
+                    // list selects nothing on its own. Preselect the same
+                    // row XFCE would: live media first, else the first
+                    // leaf in display order (offline first, then by name).
+                    if (!root.selectedLive && root.selectedLeaf === null) {
+                        if (root.isLive) {
+                            root.selectedLive = true
+                        } else if (leaves.length > 0) {
+                            const off = root.offlineImages || []
+                            const first = leaves.slice().sort((a, b) =>
+                                ((off.indexOf(b.imgref) !== -1) - (off.indexOf(a.imgref) !== -1))
+                                || String(a.name).localeCompare(String(b.name)))[0]
+                            root.selectedLeaf = first
+                        }
+                    }
+                } catch (e) {
+                    root.catalogLeaves = []
+                    root.catalogError = "Could not read the image catalog."
+                }
+                root.catalogLoaded = true
+            }
+        }
+        stderr: StdioCollector {
+            onStreamFinished: {
+                // An empty stderr is the success path (both streams close
+                // at exit): only a message means the catalog failed.
+                if (text.trim() === "")
+                    return
+                root.catalogLeaves = []
+                root.catalogError = text.trim()
+                root.catalogLoaded = true
+            }
+        }
+    }
+
+    // Live-session preflight (`session-get`): keyboard, locale, timezone
+    // and connectivity. Best-effort reads — what fails stays empty and the
+    // page offers its fallbacks.
+    Process {
+        id: sessionProc
+        command: [root.backendBin, "session-get"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    const state = JSON.parse(text)
+                    if (state.keyboard) {
+                        if (state.keyboard.current) root.keyboardLayout = state.keyboard.current
+                        root.keyboardLayouts = state.keyboard.available || []
+                    }
+                    if (state.locale) {
+                        if (state.locale.current) root.localeName = state.locale.current
+                        root.localeList = state.locale.available || []
+                    }
+                    if (state.timezone) {
+                        if (state.timezone.current) root.timezoneName = state.timezone.current
+                        root.timezoneList = state.timezone.available || []
+                    }
+                    root.netConnected = state.connected === true
+                } catch (e) { /* best-effort: the fallbacks stand in */ }
+                root.sessionLoaded = true
+            }
+        }
+        stderr: StdioCollector {
+            onStreamFinished: root.sessionLoaded = true
+        }
+    }
+
+    // Applying the preflight (`session-set`): the Session step's choice as
+    // JSON on stdin — the same never-argv rule as the recipe, though these
+    // values are only session configuration. Advances on exit.
+    Process {
+        id: sessionSetProc
+        command: [root.backendBin, "session-set"]
+        stdinEnabled: true
+        onStarted: {
+            sessionSetProc.write(root.pendingSession)
+            root.pendingSession = ""
+        }
+        stderr: StdioCollector {
+            id: sessionSetErr
+            onStreamFinished: root.sessionError = text.trim()
+        }
+        onExited: (code, status) => {
+            if (code === 0) {
+                root.sessionError = ""
+                root.flowNext()
+            }
+        }
+    }
+
+    // Stopping a running install (`cancel`): the wrapper's process group,
+    // recorded by the backend — quitting mid-install must not orphan it.
+    Process {
+        id: cancelProc
+        command: [root.backendBin, "cancel"]
+    }
+
+    // Power actions on the host (dialog_poweroff parity): systemctl
+    // through flatpak-spawn when sandboxed, never in this runtime.
+    Process {
+        id: poweroffProc
+        command: [root.backendBin, "poweroff"]
+    }
+    Process {
+        id: firmwareProc
+        command: [root.backendBin, "firmware"]
+    }
+
     Process {
         id: installProc
         // The recipe may hold a LUKS passphrase. Feed it over stdin
@@ -429,7 +678,7 @@ ApplicationWindow {
         }
         onExited: (code, status) => {
             root.installSuccess = (code === 0)
-            root.currentPage = 6
+            root.currentPage = 8
         }
     }
 
@@ -500,25 +749,40 @@ ApplicationWindow {
         installFraction = 0
         installStepName = ""
         barState = BarMath.newState()
-        currentPage = 5
+        currentPage = 7
+        const leaf = root.selectedLeaf || {}
         const recipe = {
             disk: selectedDisk.path,
-            filesystem: "xfs",
+            filesystem: root.filesystem,
+            // XFCE's build_recipe: subvolumes only on btrfs, whatever the
+            // checkbox says; flatpaks split on whitespace, and a
+            // "@"-prefixed value is a catalog reference, not a list.
+            btrfsSubvolumes: root.filesystem === "btrfs" && root.btrfsSubvolumes,
             encryption: root.needsPassphrase(root.encType)
                 ? { type: root.encType, passphrase: root.passphrase }
                 : { type: root.encType },
             // Empty image = install the running system, which fisherman
             // accepts only on live media (probe's live.is_live).
-            image: isLive ? "" : defaultImage,
+            image: root.selectedImage,
             hostname: hostname,
             distroID: root.branding.id || "linux",
             // true makes bootc boot the installed system with selinux=0.
             selinuxDisabled: false
             // No additionalImageStores: fisherman exposes the host's stores.
         }
-        // The account, as XFCE writes it; left out with no username (the
-        // schema's "empty skips"), which the account page never lets through.
-        if (root.username !== "")
+        // The leaf's install properties: absent keys mean "let fisherman
+        // decide", which is not the same as an empty value.
+        if (leaf.bootloader)
+            recipe.bootloader = leaf.bootloader
+        if (leaf.composefs === true)
+            recipe.composeFsBackend = true
+        const flats = Array.isArray(leaf.flatpaks) ? leaf.flatpaks.join(" ") : (leaf.flatpaks || "")
+        if (flats !== "" && flats.charAt(0) !== "@")
+            recipe.flatpaks = flats.split(/\s+/).filter(s => s !== "")
+        // The account, as XFCE writes it: omitted when the image makes
+        // its own first user, or with no username (the schema's "empty
+        // skips"). The account page never lets the latter through.
+        if (root.needsUserCreation && root.username !== "")
             recipe.user = {
                 username: root.username,
                 fullname: root.fullname,
@@ -533,24 +797,60 @@ ApplicationWindow {
         // tuna-os/tuna-installer-niri#22.
     }
 
+    // The Session step's choice, applied to the live session (`session-set`
+    // on stdin, like the recipe) before moving on. Applied even when
+    // unchanged: the tools are idempotent and the page cannot know what a
+    // previous run left behind.
+    function applySession() {
+        root.pendingSession = JSON.stringify({
+            keyboard: keyCombo.currentText || "",
+            locale: localeCombo.currentText || "",
+            timezone: tzCombo.currentText || ""
+        })
+        sessionSetProc.running = true
+    }
+    // Leaving the Source step resolves the install's defaults the way
+    // XFCE's SetupPage.on_enter does: the leaf's filesystem until the user
+    // picks one, and the leaf's hostname seed until they type one.
+    function chooseAndNext() {
+        if (!root.sourceReady)
+            return
+        if (!root.fsChosen)
+            root.showFilesystem((root.selectedLeaf && root.selectedLeaf.filesystem) || "")
+        if (!root.hostnameTouched && root.selectedLeaf && root.selectedLeaf.default_hostname)
+            root.hostname = root.selectedLeaf.default_hostname
+        root.checkFields()
+        root.flowNext()
+    }
     // ── Keyboard: Enter advances, Shift+Enter goes back (the hint bar says so) ──
     function advance() {
         switch (currentPage) {
-        case 0: discoverProc.running = true; currentPage = 1; break
-        case 1: if (selectedDisk.path !== undefined) currentPage = 2; break
-        case 2: encryptionPage.next(); break
-        case 3: if (root.accountReady) currentPage = 4; break
-        case 4: if (selectedDisk.path !== undefined && root.hostnameProblem === "" && root.accountReady) startInstall(); break
+        case 0:
+            discoverProc.running = true
+            catalogProc.running = true
+            sessionProc.running = true
+            flowNext()
+            break
+        case 1: applySession(); break
+        case 2: chooseAndNext(); break
+        case 3: if (selectedDisk.path !== undefined) flowNext(); break
+        case 4: encryptionPage.next(); break
+        case 5: if (root.accountReady) flowNext(); break
+        case 6:
+            if (selectedDisk.path !== undefined && root.hostnameProblem === ""
+                    && (!root.needsUserCreation || root.accountReady)) startInstall()
+            break
         }
     }
     function back() {
-        if (currentPage >= 1 && currentPage <= 4) currentPage -= 1
+        if (currentPage >= 1 && currentPage <= 6) flowBack()
     }
     Shortcut {
         sequence: "Return"
         enabled: !passField.activeFocus && !passConfirm.activeFocus && !hostField.activeFocus
             && !userField.activeFocus && !fullnameField.activeFocus
             && !userPassField.activeFocus && !userPassConfirm.activeFocus
+            && !keyCombo.activeFocus && !localeCombo.activeFocus && !tzCombo.activeFocus
         onActivated: root.advance()
     }
     Shortcut { sequence: "Shift+Return"; onActivated: root.back() }
@@ -566,7 +866,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             spacing: Theme.spacingM
             StyledText {
-                text: "Step " + (root.currentPage + 1) + " of " + root.pageNames.length + " · " + root.pageNames[root.currentPage]
+                text: "Step " + (root.flowPos + 1) + " of " + root.flowCount + " · " + root.pageNames[root.currentPage]
                 color: Theme.surfaceVariantText
                 font.pixelSize: Theme.fontSizeSmall
                 font.weight: Theme.fontWeightMedium
@@ -575,13 +875,13 @@ ApplicationWindow {
             Row {
                 spacing: Theme.spacingS
                 Repeater {
-                    model: root.pageNames.length
+                    model: root.flowCount
                     Rectangle {
                         required property int index
-                        width: index === root.currentPage ? 24 : 8
+                        width: index === root.flowPos ? 24 : 8
                         height: 8
                         radius: 4
-                        color: index <= root.currentPage ? Theme.primary : Theme.surfaceContainerHighest
+                        color: index <= root.flowPos ? Theme.primary : Theme.surfaceContainerHighest
                         Behavior on width { NumberAnimation { duration: Theme.mediumDuration; easing.type: Theme.standardEasing } }
                         Behavior on color { ColorAnimation { duration: Theme.mediumDuration } }
                     }
@@ -649,16 +949,11 @@ ApplicationWindow {
                         horizontalAlignment: Text.AlignHCenter
                         Layout.fillWidth: true
                     }
-                    // fisherman's minimum requirements (RAM, CPU cores, UEFI).
-                    // A warning, not a gate: shared/probe/README.md.
-                    StyledText {
-                        text: root.requirementsWarning
-                        visible: text !== ""
-                        color: Theme.warning
-                        horizontalAlignment: Text.AlignHCenter
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
+                    // fisherman's minimum requirements block here (GNOME's
+                    // window_cpu/window_ram/window_unsupported parity):
+                    // the gate dialog below covers this page until each
+                    // unmet requirement is accepted or the host powers
+                    // off. No inline warning — a warning is not a gate.
                     DankButton {
                         text: root.text("welcome_button")
                         buttonHeight: Theme.buttonHeightM
@@ -669,7 +964,211 @@ ApplicationWindow {
                 }
             }
 
-            // Page 1: Disk selection — a grouped list of DankListItems.
+            // Page 1: Session — live-session preflight (GNOME defaults/*
+            // parity, applied to the live session only: the fisherman
+            // recipe has no locale keys). Values apply on Continue via
+            // `session-set`; a check that cannot run leaves its fallback.
+            ColumnLayout {
+                spacing: Theme.spacingM
+
+                StyledText {
+                    text: "Session"
+                    font.pixelSize: Theme.fontSizeXLarge
+                    font.weight: Theme.fontWeightMedium
+                }
+                StyledText {
+                    text: "Keyboard, language, time and network for this live session. Nothing here goes into the installed system."
+                    color: Theme.surfaceVariantText
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                DankCard {
+                    Layout.fillWidth: true
+                    title: "Keyboard and language"
+                    GridLayout {
+                        width: parent.width
+                        columns: 2
+                        columnSpacing: Theme.spacingXL
+                        rowSpacing: Theme.spacingS
+
+                        StyledText { text: "Keyboard"; color: Theme.surfaceVariantText }
+                        ComboBox {
+                            id: keyCombo
+                            objectName: "sessionKeyboard"
+                            editable: true
+                            model: root.keyboardModel
+                            currentIndex: Math.max(0, root.keyboardModel.indexOf(root.keyboardLayout))
+                            implicitWidth: 300
+                        }
+
+                        StyledText { text: "Language"; color: Theme.surfaceVariantText }
+                        ComboBox {
+                            id: localeCombo
+                            objectName: "sessionLocale"
+                            editable: true
+                            model: root.localeModel
+                            currentIndex: Math.max(0, root.localeModel.indexOf(root.localeName))
+                            implicitWidth: 300
+                        }
+
+                        StyledText { text: "Timezone"; color: Theme.surfaceVariantText }
+                        ComboBox {
+                            id: tzCombo
+                            objectName: "sessionTimezone"
+                            editable: true
+                            model: root.timezoneModel
+                            currentIndex: Math.max(0, root.timezoneModel.indexOf(root.timezoneName))
+                            implicitWidth: 300
+                        }
+                    }
+                }
+
+                DankCard {
+                    Layout.fillWidth: true
+                    title: "Network"
+                    RowLayout {
+                        width: parent.width
+                        spacing: Theme.spacingM
+                        StyledText {
+                            text: root.sessionLoaded
+                                ? (root.netConnected ? "Connected — downloads will work." : "Offline — only installed or cached images can be used.")
+                                : "Checking…"
+                            color: root.sessionLoaded && !root.netConnected ? Theme.warning : Theme.surfaceVariantText
+                            Layout.fillWidth: true
+                        }
+                        DankButton {
+                            text: "Recheck"
+                            tonal: true
+                            enabled: !sessionProc.running
+                            onClicked: sessionProc.running = true
+                        }
+                    }
+                }
+
+                StyledText {
+                    text: root.sessionError
+                    color: Theme.error
+                    visible: text !== ""
+                    font.pixelSize: Theme.fontSizeSmall
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                Item { Layout.fillHeight: true }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    DankButton { text: "Back"; tonal: true; onClicked: root.back() }
+                    Item { Layout.fillWidth: true }
+                    DankButton {
+                        text: "Continue"
+                        enabled: !sessionSetProc.running
+                        onClicked: root.applySession()
+                    }
+                }
+            }
+
+            // Page 2: Source — what to install (XFCE SourcePage parity).
+            // Live media offers the running system; the catalog offers one
+            // row per leaf, offline images first. With no catalog and no
+            // live media the branding default stands in, the way the old
+            // wizard installed it without asking.
+            ColumnLayout {
+                spacing: Theme.spacingM
+
+                StyledText {
+                    text: "What do you want to install?"
+                    font.pixelSize: Theme.fontSizeXLarge
+                    font.weight: Theme.fontWeightMedium
+                }
+
+                ListView {
+                    id: sourceList
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    spacing: Theme.groupedListGap
+                    model: {
+                        const rows = []
+                        if (root.isLive)
+                            rows.push({ live: true })
+                        for (const leaf of root.sortedLeaves)
+                            rows.push({ live: false, leaf: leaf })
+                        if (rows.length === 0 && root.catalogLoaded)
+                            rows.push({ fallback: true })
+                        return rows
+                    }
+                    delegate: DankListItem {
+                        required property var modelData
+                        required property int index
+                        width: sourceList.width
+                        firstInGroup: index === 0
+                        lastInGroup: index === sourceList.count - 1
+                        primaryText: modelData.live
+                            ? root.text("welcome_install")
+                            : (modelData.fallback
+                                ? (root.catalogDefaultImage || root.defaultImage || "Default image")
+                                : modelData.leaf.name)
+                        secondaryText: modelData.live
+                            ? root.text("welcome_install_subtitle")
+                            : (modelData.fallback
+                                ? "No catalog found"
+                                : [modelData.leaf.imgref,
+                                   root.isOffline(modelData.leaf.imgref) ? "available offline" : "requires a download"]
+                                    .filter(s => s).join("  ·  "))
+                        isSelected: modelData.live ? root.selectedLive
+                            : (modelData.fallback ? (root.selectedLeaf === null && !root.selectedLive)
+                                : (root.selectedLeaf !== null && !root.selectedLive
+                                    && root.selectedLeaf.imgref === modelData.leaf.imgref))
+                        onClicked: {
+                            if (modelData.live) {
+                                root.selectedLive = true
+                                root.selectedLeaf = null
+                            } else if (modelData.fallback) {
+                                root.selectedLive = false
+                                root.selectedLeaf = null
+                            } else {
+                                root.selectedLive = false
+                                root.selectedLeaf = modelData.leaf
+                            }
+                        }
+                    }
+                    StyledText {
+                        anchors.centerIn: parent
+                        width: sourceList.width
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                        visible: sourceList.count === 0
+                        text: root.catalogLoaded ? "No image catalog found." : "Loading images…"
+                        color: Theme.surfaceVariantText
+                    }
+                }
+
+                StyledText {
+                    text: root.catalogError
+                    visible: text !== ""
+                    color: Theme.warning
+                    font.pixelSize: Theme.fontSizeSmall
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+
+                Item { Layout.fillHeight: true }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    DankButton { text: "Back"; tonal: true; onClicked: root.back() }
+                    Item { Layout.fillWidth: true }
+                    DankButton {
+                        text: "Continue"
+                        enabled: root.sourceReady && root.catalogLoaded
+                        onClicked: root.chooseAndNext()
+                    }
+                }
+            }
+
+            // Page 3: Disk selection — a grouped list of DankListItems.
             ColumnLayout {
                 spacing: Theme.spacingM
 
@@ -733,7 +1232,7 @@ ApplicationWindow {
                 }
             }
 
-            // Page 2: Encryption — a grouped list of choices, a card of fields.
+            // Page 4: Encryption — a grouped list of choices, a card of fields.
             //
             // Options mirror tuna-installer-xfce's ENCRYPTION_CHOICES, which is
             // the reference implementation — same values, same wording, so the
@@ -748,13 +1247,13 @@ ApplicationWindow {
                     // fisherman's rules (an empty passphrase) come from
                     // `validate`; that the two entries match is this page's.
                     root.passphrase = passField.text
-                    if (root.encryptionProblem !== "") return
+                    if (root.encryptionProblem !== "" || root.filesystemProblem !== "") return
                     if (root.needsPassphrase(root.encType) && passField.text !== passConfirm.text) {
                         passError.text = "Passphrases do not match."
                         return
                     }
                     passError.text = ""
-                    root.currentPage = 3
+                    root.flowNext()
                 }
 
                 StyledText {
@@ -824,6 +1323,59 @@ ApplicationWindow {
                     }
                 }
 
+                // Filesystem (XFCE SetupPage Advanced parity): the rows
+                // follow the catalog leaf until the user picks one
+                // (showFilesystem without fsChosen does not count).
+                DankCard {
+                    Layout.fillWidth: true
+                    title: "Advanced"
+                    Column {
+                        width: parent.width
+                        spacing: Theme.spacingS
+                        StyledText {
+                            text: root.selectedLeaf && root.selectedLeaf.filesystem
+                                ? "Filesystem (from the selected image — change to override)"
+                                : "Filesystem"
+                            color: Theme.surfaceVariantText
+                            font.pixelSize: Theme.fontSizeSmall
+                        }
+                        ColumnLayout {
+                            width: parent.width
+                            spacing: Theme.groupedListGap
+                            Repeater {
+                                model: root.filesystems
+                                DankListItem {
+                                    required property string modelData
+                                    required property int index
+                                    Layout.fillWidth: true
+                                    firstInGroup: index === 0
+                                    lastInGroup: index === root.filesystems.length - 1
+                                    primaryText: modelData
+                                    monospace: true
+                                    isSelected: root.filesystem === modelData
+                                    onClicked: {
+                                        root.filesystem = modelData
+                                        root.fsChosen = true
+                                    }
+                                }
+                            }
+                        }
+                        DankListItem {
+                            width: parent.width
+                            visible: root.filesystem === "btrfs"
+                            primaryText: "Create btrfs subvolumes (@, @home, @snapshots)"
+                            isSelected: root.btrfsSubvolumes
+                            onClicked: root.btrfsSubvolumes = !root.btrfsSubvolumes
+                        }
+                        StyledText {
+                            text: root.filesystemProblem
+                            color: Theme.error
+                            visible: text !== ""
+                            font.pixelSize: Theme.fontSizeSmall
+                        }
+                    }
+                }
+
                 Item { Layout.fillHeight: true }
 
                 RowLayout {
@@ -834,7 +1386,7 @@ ApplicationWindow {
                 }
             }
 
-            // Page 3: Account — the user fisherman creates (the recipe's
+            // Page 5: Account — the user fisherman creates (the recipe's
             // `user` block). The username rules are fisherman's, through
             // `validate`; that the password is set and typed the same twice
             // is this page's. The heading names no screen of the parity
@@ -944,7 +1496,7 @@ ApplicationWindow {
                 }
             }
 
-            // Page 4: Confirm — the summary on a card, the product's own lines
+            // Page 6: Confirm — the summary on a card, the product's own lines
             // around it, Install in the error tone (it erases a disk).
             ColumnLayout {
                 spacing: Theme.spacingM
@@ -984,19 +1536,37 @@ ApplicationWindow {
                         rowSpacing: Theme.spacingS
                         StyledText { text: "Target disk"; color: Theme.surfaceVariantText }
                         StyledText { text: root.selectedDisk.path ? root.selectedDisk.path : "—"; isMonospace: true }
+                        StyledText { text: "Image"; color: Theme.surfaceVariantText }
+                        StyledText {
+                            text: root.isLive && root.selectedLive
+                                ? (root.liveImage || "this system") + "  (this system, no download)"
+                                : (root.selectedLeaf
+                                    ? root.selectedLeaf.name + "  (" + root.selectedLeaf.imgref + ")"
+                                    : (root.selectedImage || "—"))
+                            isMonospace: true
+                            font.pixelSize: Theme.fontSizeSmall
+                            Layout.fillWidth: true
+                        }
                         StyledText { text: "Filesystem"; color: Theme.surfaceVariantText }
-                        StyledText { text: "xfs"; isMonospace: true }
+                        StyledText {
+                            text: root.filesystem + (root.filesystem === "btrfs" && root.btrfsSubvolumes ? "  (subvolumes)" : "")
+                            isMonospace: true
+                        }
                         StyledText { text: "Encryption"; color: Theme.surfaceVariantText }
                         StyledText { text: root.encryptionText(root.encType, "_label"); isMonospace: true }
-                        StyledText { text: "Username"; color: Theme.surfaceVariantText }
-                        StyledText { objectName: "confirmUsername"; text: root.username || "—"; isMonospace: true }
+                        StyledText { text: "Username"; color: Theme.surfaceVariantText; visible: root.needsUserCreation }
+                        StyledText {
+                            objectName: "confirmUsername"
+                            visible: root.needsUserCreation
+                            text: root.username || "—"; isMonospace: true
+                        }
                         StyledText { text: "Hostname"; color: Theme.surfaceVariantText }
                         ColumnLayout {
                             spacing: 2
                             DankTextField {
                                 id: hostField
                                 text: root.hostname
-                                onTextEdited: root.hostname = text  // not onTextChanged: that fires at load and would pin the branding default
+                                onTextEdited: { root.hostnameTouched = true; root.hostname = text }  // not onTextChanged: that fires at load and would pin the branding default
                                 font.family: Theme.monoFontFamily
                                 implicitWidth: 260
                                 isError: root.hostnameProblem !== ""
@@ -1008,15 +1578,6 @@ ApplicationWindow {
                                 visible: text !== ""
                                 font.pixelSize: Theme.fontSizeSmall
                             }
-                        }
-                        StyledText { text: "Image"; color: Theme.surfaceVariantText }
-                        StyledText {
-                            text: root.isLive
-                                ? (root.liveImage || "this system") + "  (this system, no download)"
-                                : (root.defaultImage || "—")
-                            isMonospace: true
-                            font.pixelSize: Theme.fontSizeSmall
-                            Layout.fillWidth: true
                         }
                     }
                 }
@@ -1039,13 +1600,14 @@ ApplicationWindow {
                         text: root.text("confirm_button")
                         destructive: true
                         enabled: root.selectedDisk.path !== undefined && root.hostnameProblem === ""
-                            && root.accountReady
+                            && root.filesystemProblem === ""
+                            && (!root.needsUserCreation || root.accountReady)
                         onClicked: root.startInstall()
                     }
                 }
             }
 
-            // Page 5: Install progress — determinate bar from the [n/9] lines,
+            // Page 7: Install progress — determinate bar from the [n/9] lines,
             // the log on a card.
             ColumnLayout {
                 spacing: Theme.spacingM
@@ -1103,9 +1665,47 @@ ApplicationWindow {
                     color: Theme.warning
                     font.pixelSize: Theme.fontSizeSmall
                 }
+                // The persistent install log (dialog_output parity): its
+                // path on disk plus a copy of what scrolled past. The
+                // in-memory installLog is gone the moment the window
+                // closes; this file is what support asks for.
+                TextEdit {
+                    id: logClip
+                    visible: false
+                    text: root.installLog
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingM
+                    StyledText {
+                        text: root.logPath !== "" ? "Log: " + root.logPath : ""
+                        visible: text !== ""
+                        color: Theme.surfaceVariantText
+                        font.pixelSize: Theme.fontSizeSmall
+                        isMonospace: true
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+                    DankButton {
+                        text: "Copy log"
+                        tonal: true
+                        onClicked: {
+                            logClip.selectAll()
+                            logClip.copy()
+                            logClip.deselect()
+                        }
+                    }
+                    DankButton {
+                        objectName: "cancelInstallButton"
+                        text: "Cancel"
+                        tonal: true
+                        visible: installProc.running
+                        onClicked: cancelProc.running = true
+                    }
+                }
             }
 
-            // Page 6: Done
+            // Page 8: Done
             Item {
                 ColumnLayout {
                     anchors.centerIn: parent
@@ -1219,10 +1819,27 @@ ApplicationWindow {
                             }
                         }
                     }
+                    // Tour (views/tour.py parity): the leaf's carousel, if it
+                    // ships one. A panel would strand the slides after the
+                    // window closes; the overlay keeps Close one tap away.
+                    // The phone companion stays GNOME-only (see below).
+                    DankButton {
+                        Layout.alignment: Qt.AlignHCenter
+                        text: "Take a tour"
+                        tonal: true
+                        visible: root.installSuccess && root.tourSlides.length > 0
+                        onClicked: { root.tourIndex = 0; root.tourOpen = true }
+                    }
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
                         spacing: Theme.spacingM
                         DankButton { text: "Close"; tonal: true; onClicked: Qt.quit() }
+                        DankButton {
+                            text: "Power off"
+                            tonal: true
+                            visible: root.installSuccess
+                            onClicked: root.powerOpen = true
+                        }
                         DankButton {
                             objectName: "doneRestartButton"
                             text: root.text("done_restart")
@@ -1240,10 +1857,10 @@ ApplicationWindow {
         RowLayout {
             Layout.fillWidth: true
             spacing: Theme.spacingL
-            visible: root.currentPage <= 4
+            visible: root.currentPage <= 6
             Repeater {
                 model: [
-                    { key: "Enter", what: root.currentPage === 4 ? root.text("confirm_button") : "Continue" },
+                    { key: "Enter", what: root.currentPage === 6 ? root.text("confirm_button") : "Continue" },
                     { key: "Shift+Enter", what: "Back" },
                     { key: "Tab", what: "Next field" }
                 ]
@@ -1275,4 +1892,183 @@ ApplicationWindow {
             Item { Layout.fillWidth: true }
         }
     }
+    // Requirements gate overlay (window_cpu/window_ram/window_unsupported
+    // parity). An unmet requirement blocks the welcome page: RAM/CPU
+    // offer "Continue anyway" (the Ignore path the GTK gates relaunch
+    // with); UEFI offers no continue — only power off or the firmware
+    // setup that fixes it.
+    Rectangle {
+        anchors.fill: parent
+        visible: root.gateOpen
+        color: Theme.withAlpha(Theme.surface, 0.75)
+        z: 10
+        MouseArea { anchors.fill: parent }
+        DankCard {
+            anchors.centerIn: parent
+            width: Math.min(parent.width - Theme.spacingXL * 2, 520)
+            title: root.text("requirements_title")
+            Column {
+                width: parent.width
+                spacing: Theme.spacingM
+                StyledText {
+                    text: root.requirementsWarning.split("\n").slice(1).join("\n")
+                    color: Theme.warning
+                    wrapMode: Text.Wrap
+                    width: parent.width
+                }
+                RowLayout {
+                    width: parent.width
+                    spacing: Theme.spacingM
+                    Item { Layout.fillWidth: true }
+                    DankButton {
+                        visible: !root.gateUefi
+                        text: "Continue anyway"
+                        onClicked: root.gatesAccepted = true
+                    }
+                    DankButton {
+                        visible: root.gateUefi
+                        text: "Firmware setup"
+                        onClicked: firmwareProc.running = true
+                    }
+                    DankButton {
+                        text: "Power off"
+                        tonal: true
+                        onClicked: root.powerOpen = true
+                    }
+                }
+            }
+        }
+    }
+
+    // Power dialog overlay (dialog_poweroff parity): the host is
+    // rebooted or powered off through systemctl, never in this
+    // runtime. The firmware row only exists on UEFI, the same
+    // condition BootcPoweroffDialog checks with Systeminfo.is_uefi().
+    Rectangle {
+        anchors.fill: parent
+        visible: root.powerOpen
+        color: Theme.withAlpha(Theme.surface, 0.75)
+        z: 11
+        MouseArea { anchors.fill: parent; onClicked: root.powerOpen = false }
+        DankCard {
+            anchors.centerIn: parent
+            width: Math.min(parent.width - Theme.spacingXL * 2, 420)
+            title: "Power"
+            ColumnLayout {
+                width: parent.width
+                spacing: Theme.groupedListGap
+                DankListItem {
+                    Layout.fillWidth: true
+                    firstInGroup: true
+                    lastInGroup: root.gateUefi
+                    primaryText: "Power off"
+                    secondaryText: "Shut down this computer"
+                    onClicked: poweroffProc.running = true
+                }
+                DankListItem {
+                    Layout.fillWidth: true
+                    firstInGroup: false
+                    lastInGroup: !root.gateUefi
+                    primaryText: "Restart"
+                    secondaryText: "Restart this computer"
+                    onClicked: rebootProc.running = true
+                }
+                DankListItem {
+                    Layout.fillWidth: true
+                    visible: !root.gateUefi
+                    firstInGroup: false
+                    lastInGroup: true
+                    primaryText: "Firmware setup"
+                    secondaryText: "Reboot into the firmware settings"
+                    onClicked: firmwareProc.running = true
+                }
+                DankButton {
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.topMargin: Theme.spacingS
+                    text: "Close"
+                    tonal: true
+                    onClicked: root.powerOpen = false
+                }
+            }
+        }
+    }
+
+    // Tour overlay (views/tour.py parity): the selected leaf's
+    // carousel slides, or nothing — the done page hides its button
+    // when the catalog ships no artwork.
+    //
+    // Deliberately not covered: the phone companion
+    // (utils/phone_companion.py). It needs an HTTP server, a QR
+    // encoder and credential injection into the recipe, none of which
+    // this thin QML layer has — and PARITY.md keeps it GNOME-only by
+    // design, with no fisherman rule to back it.
+    Rectangle {
+        anchors.fill: parent
+        visible: root.tourOpen && root.tourSlides.length > 0
+        color: Theme.withAlpha(Theme.surface, 0.85)
+        z: 12
+        MouseArea { anchors.fill: parent }
+        DankCard {
+            anchors.centerIn: parent
+            width: Math.min(parent.width - Theme.spacingXL * 2, 560)
+            title: {
+                const slide = root.tourSlides[Math.min(root.tourIndex, root.tourSlides.length - 1)] || {}
+                return slide.title || ("Slide " + (root.tourIndex + 1) + " of " + root.tourSlides.length)
+            }
+            Column {
+                width: parent.width
+                spacing: Theme.spacingM
+                Image {
+                    width: parent.width
+                    height: 240
+                    fillMode: Image.PreserveAspectFit
+                    source: {
+                        const slide = root.tourSlides[Math.min(root.tourIndex, root.tourSlides.length - 1)] || {}
+                        return slide.image || ""
+                    }
+                    visible: status === Image.Ready
+                }
+                StyledText {
+                    text: {
+                        const slide = root.tourSlides[Math.min(root.tourIndex, root.tourSlides.length - 1)] || {}
+                        return slide.description || ""
+                    }
+                    visible: text !== ""
+                    color: Theme.surfaceVariantText
+                    wrapMode: Text.Wrap
+                    width: parent.width
+                }
+                RowLayout {
+                    width: parent.width
+                    spacing: Theme.spacingM
+                    DankButton {
+                        text: "‹"
+                        tonal: true
+                        enabled: root.tourIndex > 0
+                        onClicked: root.tourIndex = Math.max(0, root.tourIndex - 1)
+                    }
+                    Item { Layout.fillWidth: true }
+                    StyledText {
+                        text: (root.tourIndex + 1) + " / " + root.tourSlides.length
+                        color: Theme.surfaceVariantText
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+                    Item { Layout.fillWidth: true }
+                    DankButton {
+                        text: "›"
+                        tonal: true
+                        enabled: root.tourIndex < root.tourSlides.length - 1
+                        onClicked: root.tourIndex = Math.min(root.tourSlides.length - 1, root.tourIndex + 1)
+                    }
+                }
+                DankButton {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "Close"
+                    tonal: true
+                    onClicked: root.tourOpen = false
+                }
+            }
+        }
+    }
+
 }

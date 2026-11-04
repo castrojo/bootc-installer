@@ -91,10 +91,12 @@ and the encryption choices), `readiness.rs`, `branding.rs`, `capture.rs`
   `validate_<code>` and holds Continue on it.
 - The account page writes the recipe's `user` block
   (`model::user_block`: username, fullname, password, groups `["wheel"]`;
-  left out with no username). It is required, as there is no image catalog
-  to say otherwise. Its username goes into the same partial check; the
-  password does not (the non-empty and typed-twice rules are this
-  frontend's). A `user.*` problem holds only the account page.
+  left out with no username). It is required unless the image catalog
+  (`src/image_catalog.rs`, `image.py` semantics) or a custom image URL says
+  the image creates its own first user — then the page is skipped and
+  Confirm names the provider instead. Its username goes into the same
+  partial check; the password does not (the non-empty and typed-twice rules
+  are this frontend's). A `user.*` problem holds only the account page.
 - Encryption choices are `src/encryption-choices.json`, fisherman's file
   byte for byte, compiled in (`validate::choices`). Branch on
   `needs_passphrase` / `needs_tpm2`, never on the type's name.

@@ -7,17 +7,41 @@ recipe, and presents the backend's progress and result.
 
 ## Flow
 
-The installer has six screens:
+The installer walks fifteen screens, in GNOME parity order. Conditional
+screens are skipped rather than shown blank (see `page_visible`):
 
-1. **Welcome** introduces the detected TunaOS product.
-2. **Select a disk** lists the disks that `fisherman probe --json` offers and requires a
+1. **Requirements** blocks on fisherman's unmet requirements (RAM, CPU,
+   firmware) with per-gate cards. RAM and CPU offer "continue anyway";
+   unsupported firmware offers only power off (plus a firmware-setup
+   reboot). Shown only while a gate stands.
+2. **Welcome** introduces the detected TunaOS product.
+3. **Choose a system** offers the image catalog leaves plus a custom-URL
+   row. Skipped on live media and with fewer than two leaves.
+4. **Language**, 5. **Keyboard**, 6. **Time zone** apply the live
+   session's locale settings choices via `localectl`/`timedatectl` on the
+   host (best-effort; never blocking).
+7. **Network** runs the connectivity check (`ghcr.io:443`, then
+   `8.8.8.8:53`) with a Recheck button and holds Continue until it
+   passes. Skipped on live media.
+8. **Select a disk** lists the disks that `fisherman probe --json` offers and requires a
    selection before continuing.
-3. **Options** collects the hostname, filesystem, and encryption settings.
-4. **Confirm** summarizes the choices and marks installation as a destructive
-   action.
-5. **Installing** writes a mode-0600 recipe under `XDG_RUNTIME_DIR`, starts
-   fisherman, and streams its output.
-6. **Finished** reports success or failure and prompts the user to restart.
+9. **Options** collects the hostname, filesystem, and encryption settings.
+10. **Account** creates the first user. Skipped when the selected image
+    (or a custom URL) provides its own.
+11. **Tour** shows the selected image's carousel slides, if it carries any.
+12. **Use your phone** serves the LAN companion form: the phone's
+    submission fills the account entries. Plain HTTP with a session
+    token (see `flatpak/DEPENDENCIES.md` for why not TLS); the server
+    stops when the page is left.
+13. **Confirm** summarizes the choices and marks installation as a destructive
+    action.
+14. **Installing** writes a mode-0600 recipe under `XDG_RUNTIME_DIR`, starts
+    fisherman, and streams its output.
+15. **Finished** reports success or failure and prompts the user to restart.
+
+Exiting mid-install (the header's Exit button, confirmed) signals the
+install wrapper's process group before quitting, so no orphaned root
+install survives the wizard.
 
 The header bar shows the current step and overall progress. Navigation is
 reversible through Confirm; starting installation is the boundary after which

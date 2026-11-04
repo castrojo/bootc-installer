@@ -1,14 +1,18 @@
 """Application composition and install-process orchestration."""
 
+import json
 import os
 import signal
+import sys
 
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk
+gi.require_version("Gdk", "3.0")
+from gi.repository import GLib, Gtk  # noqa: E402
 
-from . import core, readiness
+from . import core, gates, readiness
+from . import locale as locale_checks
 from .pages import (
     PAGE_ORDER,
     ConfirmPage,
@@ -31,8 +35,8 @@ def spawn_fisherman(argv, stdin_data=b""):
     this user can signal; fisherman runs as root and cancels when its parent
     dies (tuna-os/fisherman#267). The contract every frontend follows is
     "kill your wrapper's process group", which needs the wrapper in a group
-    of its own rather than the installer's. This frontend has no cancel UI,
-    so nothing signals it yet.
+    of its own rather than the installer's. Closing the window mid-install
+    asks first (ConfirmExitDialog) and then signals exactly that group.
 
     fisherman reads the recipe from stdin (`fisherman -`, #276) until EOF:
     `stdin_data` is written and the pipe closed here. A recipe is a few KiB,
@@ -43,7 +47,7 @@ def spawn_fisherman(argv, stdin_data=b""):
     """
     flags = GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD
     pid, stdin_fd, out, err = GLib.spawn_async(
-        argv, flags=flags, child_setup=os.setpgrp,
+        argv, flags=flags, child_setup=_child_setup,
         standard_input=True, standard_output=True, standard_error=True)
     try:
         view = memoryview(stdin_data)
@@ -58,10 +62,58 @@ def spawn_fisherman(argv, stdin_data=b""):
     return pid, out, err
 
 
+def _child_setup(*_args):
+    """Put the fisherman wrapper in its own process group.
+
+    GLib calls child_setup with no arguments on some versions and with a
+    user-data argument on others (newer gi passes one -- a bare os.setpgrp
+    then fails with "takes no arguments" and the wrapper stays in the
+    installer's group), so this swallows whatever it is given. The group is
+    what terminate_process_group() signals; without it the wrapper would
+    share the installer's group and the signal would hit this process too.
+    """
+    os.setpgrp()
+
+
+def terminate_process_group(pid):
+    """SIGTERM the install wrapper's process group (GNOME's
+    BootcProgress.terminate, which signals the wrapper's group so fisherman
+    notices its parent's death and runs its cleanup handler).
+
+    Falls back to the wrapper alone when it has no group, and treats a dead
+    or missing pid as a no-op: cancelling twice, or after a finished
+    install, must not raise.
+    """
+    if not pid:
+        return
+    try:
+        os.kill(pid, 0)
+    except (OSError, TypeError):
+        return
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+
 class InstallerWindow(Gtk.ApplicationWindow):
-    def __init__(self, app):
+    def __init__(self, app, autoinstall_recipe=None):
         super().__init__(application=app, title=f"{core.PRODUCT_NAME} Installer",
                          default_width=640, default_height=520)
+        # The running install, if any: spawn_fisherman's wrapper pid (the
+        # group leader terminate_process_group() signals). None otherwise.
+        # _closing guards _on_exit against touching widgets after the user
+        # confirmed quitting mid-install and the window is already gone.
+        self._install_pid = None
+        self._closing = False
+        self._autoinstall_pending = None
+        # Closing the window mid-install asks first (GNOME's
+        # __on_exit_clicked AlertDialog) and kills the install on confirm;
+        # anywhere else the close goes through untouched.
+        self.connect("delete-event", self._on_delete)
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.add(outer)
 
@@ -97,6 +149,10 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self._install_log = None
         self.show_all()
         self._enter(0)
+        if autoinstall_recipe is not None:
+            # Skip the wizard and start immediately (GNOME's
+            # _start_autoinstall via GLib.idle_add).
+            GLib.idle_add(self._start_autoinstall, autoinstall_recipe)
 
     def go(self, delta):
         self._enter(self.index + delta)
@@ -168,12 +224,99 @@ class InstallerWindow(Gtk.ApplicationWindow):
             password=identity.password.get_text(),
         )
 
-    def start_install(self, progress_page):
+    def _install_running(self):
+        """Whether fisherman is currently running under this window."""
+        if not self._install_pid:
+            return False
+        try:
+            os.kill(self._install_pid, 0)
+        except OSError:
+            return False
+        return True
+
+    def terminate_install(self):
+        """Cancel the running install: SIGTERM the wrapper's process group
+        (GNOME's BootcProgress.terminate). fisherman runs as root and cannot
+        be signalled directly; it notices its parent's death and cleans up.
+        A finished or absent install is a no-op."""
+        terminate_process_group(self._install_pid)
+        self._install_pid = None
+
+    def _on_delete(self, *_args):
+        """Guard the window close: confirm and kill the install when one is
+        running (GNOME's __on_exit_clicked/__on_exit_response), otherwise
+        let the close through."""
+        if not self._install_running():
+            return False
+        dialog = gates.ConfirmExitDialog(self)
+        response = dialog.run()
+        dialog.destroy()
+        if response == Gtk.ResponseType.OK:
+            self._closing = True
+            self.terminate_install()
+            self.destroy()
+        return True
+
+    def check_connectivity(self):
+        """Marker the confirm page looks for: this window answers
+        connectivity questions (describe_connectivity). Kept as a method so
+        test doubles without it keep the old always-continue behavior."""
+        return self.describe_connectivity()[0]
+
+    def describe_connectivity(self):
+        """(needs_network, offline): whether this install must download
+        anything. Live media installs the running system, and an image
+        already in the host's offline stores needs no download -- both are
+        fisherman's facts (probe's live/offline), the same condition
+        GNOME's conn_check.should_show inverts."""
+        source = self.pages["source"]
+        live = source.live
+        sel = source.selection() or {}
+        leaf = sel.get("leaf")
+        offline = bool(live) or (leaf is not None
+                                 and leaf.imgref in core.offline_images())
+        return (locale_checks.needs_network(offline), offline)
+
+    @staticmethod
+    def _load_autoinstall_recipe(path):
+        """The --autoinstall recipe file, read here and handed to fisherman
+        on stdin like any other recipe. None when it cannot be read or is
+        not a JSON object (GNOME's _load_autoinstall_recipe)."""
+        try:
+            with open(path, encoding="utf-8") as recipe_file:
+                recipe = json.load(recipe_file)
+        except (OSError, ValueError) as exc:
+            print(f"Failed to read install recipe {path}: {exc}",
+                  file=sys.stderr)
+            return None
+        if not isinstance(recipe, dict):
+            print(f"Install recipe {path} is not a JSON object.",
+                  file=sys.stderr)
+            return None
+        return recipe
+
+    def _start_autoinstall(self, path):
+        """Go straight to the progress page and start fisherman with the
+        pre-built recipe, bypassing the wizard (GNOME's _start_autoinstall).
+        An unreadable recipe falls back to the wizard instead of installing
+        nothing."""
+        recipe = self._load_autoinstall_recipe(path)
+        if recipe is None:
+            return False
+        self._autoinstall_pending = recipe
+        self._enter(PAGE_ORDER.index("progress"))
+        return False
+
+    def start_install(self, progress_page, recipe=None):
         if core.dry_run():
             self._start_dry_run(progress_page)
             return
 
-        recipe = self.build_recipe()
+        if self._autoinstall_pending is not None:
+            recipe = self._autoinstall_pending
+            self._autoinstall_pending = None
+        if recipe is None:
+            recipe = self.build_recipe()
         argv = core.fisherman_argv()
         self._log_tail = []
         self._install_log = core.open_install_log()
@@ -181,6 +324,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
             f"=== install started: {core.fisherman_shell()} (recipe on stdin) ===\n")
         self._install_log.flush()
         pid, out, err = spawn_fisherman(argv, core.recipe_stdin(recipe))
+        self._install_pid = pid
         for fd in (out, err):
             channel = GLib.IOChannel.unix_new(fd)
             channel.set_flags(GLib.IOFlags.NONBLOCK)
@@ -190,6 +334,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
 
     def _start_dry_run(self, progress_page):
         """Play a fisherman transcript through the real progress page."""
+        self._autoinstall_pending = None
         self._log_tail = []
         lines = list(core.DRY_RUN_TRANSCRIPT)
 
@@ -220,6 +365,10 @@ class InstallerWindow(Gtk.ApplicationWindow):
 
     def _on_exit(self, pid, status, *_):
         GLib.spawn_close_pid(pid)
+        self._install_pid = None
+        if self._closing:
+            # The user confirmed quitting mid-install; the window is gone.
+            return
         ok = os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
         if self._install_log:
             outcome = "ok" if ok else f"failed (status {status})"
@@ -236,15 +385,64 @@ APP_ID = "org.tunaos.InstallerXfce"
 
 
 class InstallerApp(Gtk.Application):
-    def __init__(self):
+    def __init__(self, autoinstall_recipe=None):
         super().__init__(application_id=APP_ID)
+        self._autoinstall_recipe = autoinstall_recipe
 
     def do_activate(self):
+        if self._autoinstall_recipe is not None:
+            # Skip the gates and the wizard: install straight from the file
+            # (GNOME's do_activate autoinstall branch).
+            win = (self.get_active_window()
+                   or InstallerWindow(self,
+                                      autoinstall_recipe=self._autoinstall_recipe))
+            readiness.arm(win, APP_ID, page_getter=lambda: PAGE_ORDER[win.index])
+            win.present()
+            return
+        # Below-minimum machines never see the wizard: a blocking gate
+        # instead (GNOME's do_activate RAM/CPU/UEFI branches). The stamp
+        # names the gate class, so the smoke test can require the wizard
+        # rather than merely a window.
+        gate = gates.required_gate()
+        if gate is not None:
+            win = self.get_active_window() or gates.GATE_BUILDERS[gate]()
+            self.add_window(win)
+            readiness.arm(win, APP_ID, page=gate)
+            win.show_all()
+            win.present()
+            return
         win = self.get_active_window() or InstallerWindow(self)
         readiness.arm(win, APP_ID, page_getter=lambda: PAGE_ORDER[win.index])
         win.present()
 
 
-def main():
+def parse_argv(argv):
+    """(autoinstall_path_or_None, rest): split --autoinstall/-a out.
+
+    GNOME registers --autoinstall as a GApplication option; this frontend
+    parses sys.argv before Gtk.Application takes it (GTK3 has no
+    add_main_option), with the same long and short spellings.
+    """
+    autoinstall = None
+    rest = []
+    take_next = False
+    for arg in argv:
+        if take_next:
+            autoinstall = arg
+            take_next = False
+        elif arg in ("--autoinstall", "-a"):
+            take_next = True
+        elif arg.startswith("--autoinstall="):
+            autoinstall = arg.split("=", 1)[1]
+        else:
+            rest.append(arg)
+    return autoinstall, rest
+
+
+def main(argv=None):
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    InstallerApp().run()
+    prog = sys.argv[0] if argv is None else "tuna-installer-xfce"
+    autoinstall, rest = parse_argv(sys.argv[1:] if argv is None else argv)
+    # run() takes a full argv (program name first); the --autoinstall pair
+    # stays out of it so GTK never sees an option it does not know.
+    InstallerApp(autoinstall_recipe=autoinstall).run([prog] + rest)

@@ -30,7 +30,7 @@ QJsonObject Recipe::toJson() const
     obj["distroID"] = distroID;
     obj["selinuxDisabled"] = selinuxDisabled;
     obj["hostname"] = hostname;
-    if (!user.username.isEmpty()) {
+    if (!user.username.isEmpty() && userRequired) {
         obj["user"] = QJsonObject{
             {QStringLiteral("username"), user.username},
             {QStringLiteral("fullname"), user.fullname},

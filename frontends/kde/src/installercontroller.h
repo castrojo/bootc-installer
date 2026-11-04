@@ -21,7 +21,9 @@ class QProcess;
 
 #include "branding.h"
 
+#include <QVariantList>
 #include <QVariantMap>
+#include "imagecatalog.h"
 #include "recipe.h"
 #include "validate.h"
 
@@ -40,11 +42,23 @@ class InstallerController : public QObject
     Q_PROPERTY(QString hostname READ hostname WRITE setHostname NOTIFY recipeChanged)
     Q_PROPERTY(QString image READ image WRITE setImage NOTIFY recipeChanged)
     // The account the installed system gets (the recipe's `user` block,
-    // groups ["wheel"]). There is no image catalog here to say an image
-    // creates its own first user, so the account step requires one.
+    // groups ["wheel"]). Required unless the selected catalog image creates
+    // its own first user (needs_user_creation, the GNOME image step and the
+    // XFCE IdentityPage rule): the wizard then skips the account step and
+    // the recipe omits the block. True when there is no catalog to say so.
     Q_PROPERTY(QString username READ username WRITE setUsername NOTIFY recipeChanged)
     Q_PROPERTY(QString fullname READ fullname WRITE setFullname NOTIFY recipeChanged)
     Q_PROPERTY(QString userPassword READ userPassword WRITE setUserPassword NOTIFY recipeChanged)
+    Q_PROPERTY(bool needsUserCreation READ needsUserCreation NOTIFY catalogChanged)
+
+    // The image catalog (fisherman's images.json, resolved like the GNOME and
+    // XFCE frontends resolve it). Empty on live media and when no manifest is
+    // installed — the install then proceeds as it does today.
+    Q_PROPERTY(bool hasCatalog READ hasCatalog CONSTANT)
+    Q_PROPERTY(QStringList catalogNames READ catalogNames NOTIFY catalogChanged)
+    Q_PROPERTY(QStringList catalogImgrefs READ catalogImgrefs NOTIFY catalogChanged)
+    Q_PROPERTY(QStringList catalogDescs READ catalogDescs NOTIFY catalogChanged)
+    Q_PROPERTY(int catalogIndex READ catalogIndex NOTIFY catalogChanged)
 
     // fisherman's tpm.usable from `fisherman probe --json`
     // (shared/probe/README.md). TPM options are hidden, not disabled, when
@@ -53,9 +67,19 @@ class InstallerController : public QObject
     Q_PROPERTY(bool hasTpm READ hasTpm CONSTANT)
     // fisherman's system.unmet ("ram", "cpu", "uefi"), and the welcome
     // step's warning built from the requirements_* copy keys; empty when
-    // every requirement is met or the probe failed. A warning, not a gate.
+    // every requirement is met or the probe failed. A warning, not a gate —
+    // except the two blocking cases below, which mirror the GNOME cpu/ram
+    // windows (continue anyway) and the unsupported window (power off).
     Q_PROPERTY(QStringList unmetRequirements READ unmetRequirements CONSTANT)
     Q_PROPERTY(QString requirementsWarning READ requirementsWarning CONSTANT)
+    // True when the machine did not boot UEFI: like BootcUnsupportedWindow,
+    // there is no continue path, only powering off.
+    Q_PROPERTY(bool requirementsFatal READ requirementsFatal CONSTANT)
+    // True when any requirement is unmet (ram, cpu or uefi).
+    Q_PROPERTY(bool requirementsBlocking READ requirementsBlocking CONSTANT)
+    // The user's explicit override for the non-fatal gates. Starts false:
+    // an unmet CPU/RAM requirement holds the welcome step until it is set.
+    Q_PROPERTY(bool continueAnyway READ continueAnyway WRITE setContinueAnyway NOTIFY continueAnywayChanged)
     // Every encryption type, in display order (Recipe::encryptionTypes()).
     // The encryption step repeats over it and hides the tpm2- ones without
     // a TPM; what each is called comes from encryptionLabel/Description.
@@ -66,6 +90,36 @@ class InstallerController : public QObject
     // fisherman installs the running system.
     Q_PROPERTY(bool isLive READ isLive CONSTANT)
     Q_PROPERTY(QString liveImage READ liveImage CONSTANT)
+
+    // Region & language preflight (the GNOME language/keyboard/timezone
+    // steps, folded into the welcome step to keep the seven-module shape).
+    // Wizard state, not recipe state: fisherman's Recipe has no such fields,
+    // and the shared schema test pins the recipe to exactly those fields —
+    // so these are shown back on the confirm screen, where GNOME shows them,
+    // and never written to the recipe.
+    Q_PROPERTY(QString language READ language WRITE setLanguage NOTIFY regionChanged)
+    Q_PROPERTY(QString keyboardLayout READ keyboardLayout WRITE setKeyboardLayout NOTIFY regionChanged)
+    Q_PROPERTY(QString timezone READ timezone WRITE setTimezone NOTIFY regionChanged)
+    Q_PROPERTY(QStringList languageIds READ languageIds CONSTANT)
+    Q_PROPERTY(QStringList languageNames READ languageNames CONSTANT)
+    Q_PROPERTY(QStringList keyboardLayoutIds READ keyboardLayoutIds CONSTANT)
+    Q_PROPERTY(QStringList keyboardLayoutNames READ keyboardLayoutNames CONSTANT)
+    Q_PROPERTY(QStringList timezones READ timezones CONSTANT)
+
+    // Network preflight (the GNOME conn_check step). `online` starts true and
+    // is corrected by one background probe: failing closed would hold the
+    // wizard on every machine whose firewall drops the probe. The welcome
+    // step blocks only when the check has actually failed AND the install
+    // needs the network (not live, selected image not already on disk).
+    Q_PROPERTY(bool online READ online NOTIFY onlineChanged)
+    Q_PROPERTY(bool onlineKnown READ onlineKnown NOTIFY onlineChanged)
+    Q_PROPERTY(bool checkingOnline READ checkingOnline NOTIFY onlineChanged)
+    Q_PROPERTY(bool needsNetwork READ needsNetwork NOTIFY catalogChanged)
+
+    // The selected catalog leaf's `carousel` slides (fisherman's images.json,
+    // shown by the GNOME tour step): title/description/image maps for the
+    // done screen. Empty when the leaf names none.
+    Q_PROPERTY(QVariantList tourSlides READ tourSlides NOTIFY catalogChanged)
 
     // fisherman's problems with the fields (`validate --json --partial`), in
     // the words of the copy key validate_<code>; empty when there is none or
@@ -164,9 +218,41 @@ public:
     QString userPassword() const { return m_recipe.user.password; }
     void setUserPassword(const QString &v);
 
+    // The assembled recipe, for tests: what startInstall() hands fisherman.
+    // QML reads the individual properties above, never this.
+    const Recipe &recipe() const { return m_recipe; }
     bool hasTpm() const { return m_hasTpm; }
     QStringList unmetRequirements() const { return m_unmet; }
     QString requirementsWarning() const;
+    bool requirementsFatal() const { return m_unmet.contains(QStringLiteral("uefi")); }
+    bool requirementsBlocking() const { return !m_unmet.isEmpty(); }
+    bool continueAnyway() const { return m_continueAnyway; }
+    void setContinueAnyway(bool v);
+    bool needsUserCreation() const { return m_needsUser; }
+    bool hasCatalog() const { return !m_catalog.leaves.isEmpty(); }
+    QStringList catalogNames() const;
+    QStringList catalogImgrefs() const;
+    QStringList catalogDescs() const;
+    int catalogIndex() const { return m_catalogIndex; }
+    Q_INVOKABLE void selectCatalogImage(int index);
+    QString language() const { return m_language; }
+    void setLanguage(const QString &v);
+    QString keyboardLayout() const { return m_keyboardLayout; }
+    void setKeyboardLayout(const QString &v);
+    QString timezone() const { return m_timezone; }
+    void setTimezone(const QString &v);
+    QStringList languageIds() const { return m_languageIds; }
+    QStringList languageNames() const { return m_languageNames; }
+    QStringList keyboardLayoutIds() const { return m_keyboardIds; }
+    QStringList keyboardLayoutNames() const { return m_keyboardNames; }
+    QStringList timezones() const { return m_timezones; }
+    Q_INVOKABLE QString timezoneDisplay(const QString &ianaId) const;
+    bool online() const { return m_online; }
+    bool onlineKnown() const { return m_onlineKnown; }
+    bool checkingOnline() const { return m_checkingOnline; }
+    bool needsNetwork() const;
+    Q_INVOKABLE void checkConnectivity();
+    QVariantList tourSlides() const { return m_tourSlides; }
     QStringList encryptionTypes() const { return Recipe::encryptionTypes(); }
     Q_INVOKABLE bool needsPassphrase(const QString &type) const { return Recipe::needsPassphrase(type); }
     Q_INVOKABLE bool needsTpm2(const QString &type) const { return Recipe::needsTpm2(type); }
@@ -192,6 +278,18 @@ public:
     }
     // The done page's Restart: systemctl reboot on the host.
     Q_INVOKABLE void reboot();
+    // Power off on the host (the unsupported-window path: flatpak-spawn
+    // --host when sandboxed, the same hostCommand reboot() uses).
+    Q_INVOKABLE void poweroff();
+    // Copies the in-window install log to the clipboard: the file outlives
+    // the window, but a failed install pasted into a bug report usually
+    // starts from this button (the GNOME BootcDialogOutput copy action).
+    Q_INVOKABLE void copyLogToClipboard();
+    // Stops a running install: terminate the wrapper, kill it if it does not
+    // go. fisherman exits when its parent dies (fisherman#267), so killing
+    // the wrapper IS the cancel contract — the same kill the exit dialog
+    // performs (BootcWindow.__on_exit_response calls view_progress.terminate).
+    Q_INVOKABLE void cancelInstall();
     QString log() const { return m_log; }
     QString logPath() const { return m_logPath; }
     int installStep() const { return m_step; }
@@ -240,6 +338,10 @@ public:
 
 Q_SIGNALS:
     void recipeChanged();
+    void catalogChanged();
+    void continueAnywayChanged();
+    void regionChanged();
+    void onlineChanged();
     void logChanged();
     void logPathChanged();
     void installingChanged();
@@ -269,7 +371,27 @@ private:
 
     Recipe m_recipe;
     bool m_diskRemovable = false;
+    // The hostname the branding ships, so a catalog default_hostname only
+    // applies when the user has not picked their own yet.
+    QString m_defaultHostname;
+    imagecatalog::Catalog m_catalog;
+    int m_catalogIndex = -1;
+    bool m_needsUser = true;
+    bool m_continueAnyway = false;
     QString m_liveImage;
+    QStringList m_offlineImages;
+    QString m_language;
+    QString m_keyboardLayout;
+    QString m_timezone;
+    QStringList m_languageIds;
+    QStringList m_languageNames;
+    QStringList m_keyboardIds;
+    QStringList m_keyboardNames;
+    QStringList m_timezones;
+    bool m_online = true;
+    bool m_onlineKnown = false;
+    bool m_checkingOnline = false;
+    QVariantList m_tourSlides;
     QList<validate::Problem> m_problems;
     QTimer m_validateTimer;
     QProcess *m_validateProcess = nullptr;

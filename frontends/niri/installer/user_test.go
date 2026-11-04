@@ -117,13 +117,18 @@ func TestNormalizeRecipeDistroID(t *testing.T) {
 
 func TestQMLHoldsTheAccountStep(t *testing.T) {
 	// The QML half of the contract, read as text: the recipe carries the
-	// user block with groups ["wheel"], the partial recipe asks fisherman
-	// about user.username, and the problem is shown through the copy keys
-	// validate_username_* (via validate_<code>).
+	// user block with groups ["wheel"] when the image needs one, the
+	// partial recipe asks fisherman about user.username, and the problem
+	// is shown through the copy keys validate_username_* (via
+	// validate_<code>). The needs_user_creation condition mirrors XFCE's
+	// win.needs_user_creation: an image that makes its own first user gets
+	// no block at all.
 	qml := readQML(t)
 	for _, want := range []string{
 		`groups: ["wheel"]`,
-		`user: { username: root.username }`,
+		`recipe.user = { username: root.username }`,
+		`root.needsUserCreation && root.username !== ""`,
+		`if (root.needsUserCreation)`,
 		`problemText("user.username")`,
 		`"Account"`,
 	} {

@@ -74,6 +74,76 @@ pub mod copy {
 
     pub const DONE_FAIL_DETAIL: &str = "The install log above has the details.";
     pub const DONE_CLOSE: &str = "Close";
+    pub const DONE_COPY_LOG: &str = "Copy log";
+    pub const EXIT_BUTTON: &str = "Exit";
+
+    // The exit confirm (BootcWindow.__on_exit_clicked): leaving loses
+    // progress, and leaving mid-install kills the install.
+    pub const EXIT_TITLE: &str = "Exit Installer?";
+    pub const EXIT_BODY: &str = "Any progress will be lost.";
+    pub const EXIT_BODY_INSTALLING: &str =
+        "The install is still running. Exiting now stops it.";
+    pub const EXIT_CANCEL: &str = "Cancel";
+    pub const EXIT_CONFIRM: &str = "Exit";
+
+    // Blocking hardware gates (BootcCpuWindow / BootcRamWindow /
+    // BootcUnsupportedWindow): one section per unmet requirement, not a
+    // warning line. RAM and CPU offer "continue anyway", unsupported
+    // firmware offers only power off.
+    pub const REQUIREMENTS_TITLE: &str = "Requirements";
+    pub const REQUIREMENTS_SUBTITLE: &str =
+        "This computer does not meet a requirement.";
+    pub const REQUIREMENTS_READY_TITLE: &str = "Requirements met";
+    pub const REQUIREMENTS_READY_BODY: &str =
+        "This computer meets the requirements.";
+    pub const REQUIREMENTS_CONTINUE_ANYWAY: &str = "Continue anyway";
+    pub const REQUIREMENTS_POWER_OFF: &str = "Power off";
+    pub const REQUIREMENTS_FIRMWARE: &str = "Firmware setup";
+
+    // Image catalog (image.py / XFCE SourcePage).
+    pub const IMAGE_TITLE: &str = "Choose a system";
+    pub const IMAGE_SUBTITLE: &str = "What to install onto the disk.";
+    pub const IMAGE_EMPTY: &str = "No image catalog was found.";
+    pub const IMAGE_CUSTOM_LABEL: &str = "Custom image";
+    pub const IMAGE_CUSTOM_HINT: &str =
+        "Container reference, for example ghcr.io/example/system:latest";
+
+    // Locale preflight (language.py / keyboard.py / timezone.py).
+    pub const LANGUAGE_TITLE: &str = "Language";
+    pub const LANGUAGE_SUBTITLE: &str = "The language of the installed system.";
+    pub const LANGUAGE_EMPTY: &str = "No locales were reported.";
+    pub const KEYBOARD_TITLE: &str = "Keyboard";
+    pub const KEYBOARD_SUBTITLE: &str = "The keyboard layout of the installed system.";
+    pub const KEYBOARD_EMPTY: &str = "No keymaps were reported.";
+    pub const TIMEZONE_TITLE: &str = "Time zone";
+    pub const TIMEZONE_SUBTITLE: &str = "Search, then pick where you are.";
+    pub const TIMEZONE_SEARCH_HINT: &str = "Search time zones";
+    pub const TIMEZONE_EMPTY: &str = "No time zones matched.";
+
+    // Connectivity preflight (network.py / conn_check.py).
+    pub const NETWORK_TITLE: &str = "Network";
+    pub const NETWORK_SUBTITLE: &str = "The installer needs the network to fetch images.";
+    pub const NETWORK_CHECKING: &str = "Checking the connection\u{2026}";
+    pub const NETWORK_ONLINE: &str = "Connected.";
+    pub const NETWORK_OFFLINE: &str =
+        "No internet connection. The installer requires an active internet connection.";
+    pub const NETWORK_RECHECK: &str = "Recheck";
+
+    // Tour carousel (views/tour.py) and phone companion (qr_companion.py).
+    pub const TOUR_TITLE: &str = "Tour";
+    pub const TOUR_BACK: &str = "Back";
+    pub const COMPANION_TITLE: &str = "Use your phone";
+    pub const COMPANION_SUBTITLE: &str = "Open the link on your phone to fill in your account. \
+         The code carries the session, so only it is shown here.";
+    pub const COMPANION_ADDRESS: &str = "On this computer";
+    pub const COMPANION_CODE: &str = "Pairing code";
+    pub const COMPANION_COPY_LINK: &str = "Copy link";
+    pub const COMPANION_APPLIED: &str = "Received from your phone. Check the entries.";
+    pub const COMPANION_WAITING: &str = "Waiting for your phone\u{2026}";
+    pub const COMPANION_DOWN: &str = "The phone form could not start on this computer.";
+
+    // Confirm page when the account was skipped: the image provides the user.
+    pub const CONFIRM_NO_ACCOUNT: &str = "Provided by the image";
 }
 
 use copy::*;
@@ -114,6 +184,32 @@ fn with_product(s: &str) -> String {
 pub fn page_text(app: &TunaInstaller) -> Vec<String> {
     let recipe = app.recipe();
     match app.page() {
+        Page::Requirements => {
+            // The blocking gates, in the shared requirements copy every
+            // frontend shows — not the inline warning the welcome page
+            // used to carry. Titles match the view, including its ready
+            // state (reachable in captures).
+            let gates = app.blocking_gates();
+            let mut t = if gates.is_empty() {
+                vec![REQUIREMENTS_READY_TITLE.to_string()]
+            } else {
+                vec![REQUIREMENTS_TITLE.to_string(), REQUIREMENTS_SUBTITLE.to_string()]
+            };
+            // Exactly what the view draws: the gate cards (or the ready
+            // line), the override for the first standing overridable gate,
+            // the power buttons, and Continue only once gates clear. The
+            // view has no Back on this first page.
+            t.extend(crate::probe::requirements_lines(app.unmet()));
+            if gates.iter().any(|g| crate::hardware::gate_overridable(*g)) {
+                t.push(REQUIREMENTS_CONTINUE_ANYWAY.to_string());
+            }
+            t.push(REQUIREMENTS_FIRMWARE.to_string());
+            t.push(REQUIREMENTS_POWER_OFF.to_string());
+            if gates.is_empty() {
+                t.push(CONTINUE.to_string());
+            }
+            t
+        }
         Page::Welcome => {
             let mut t = vec![t_line("welcome_title"), with_product(WELCOME_BODY)];
             let sub = t_line("welcome_subtitle");
@@ -136,6 +232,79 @@ pub fn page_text(app: &TunaInstaller) -> Vec<String> {
             }
             t.push(BACK.to_string());
             if app.selected_disk().is_some() {
+                t.push(CONTINUE.to_string());
+            }
+            t
+        }
+        Page::Image => {
+            let mut t = vec![IMAGE_TITLE.to_string(), IMAGE_SUBTITLE.to_string()];
+            if app.images().is_empty() {
+                t.push(IMAGE_EMPTY.to_string());
+            }
+            for leaf in app.images() {
+                t.push(leaf.name.clone());
+                if !leaf.description.is_empty() {
+                    t.push(leaf.description.clone());
+                }
+            }
+            t.extend([
+                IMAGE_CUSTOM_LABEL.to_string(),
+                IMAGE_CUSTOM_HINT.to_string(),
+                app.custom_image().to_string(),
+                BACK.to_string(),
+            ]);
+            // Continue only when something is chosen — as the view holds it.
+            if app.selected_image().is_some() || !app.custom_image().trim().is_empty() {
+                t.push(CONTINUE.to_string());
+            }
+            t
+        }
+        Page::Language => {
+            let mut t = vec![LANGUAGE_TITLE.to_string(), LANGUAGE_SUBTITLE.to_string()];
+            if app.locales().is_empty() {
+                t.push(LANGUAGE_EMPTY.to_string());
+            }
+            t.extend(app.locales().iter().cloned());
+            t.push(BACK.to_string());
+            t.push(CONTINUE.to_string());
+            t
+        }
+        Page::Keyboard => {
+            let mut t = vec![KEYBOARD_TITLE.to_string(), KEYBOARD_SUBTITLE.to_string()];
+            if app.keymaps().is_empty() {
+                t.push(KEYBOARD_EMPTY.to_string());
+            }
+            t.extend(app.keymaps().iter().cloned());
+            t.push(BACK.to_string());
+            t.push(CONTINUE.to_string());
+            t
+        }
+        Page::Timezone => {
+            let mut t = vec![
+                TIMEZONE_TITLE.to_string(),
+                TIMEZONE_SUBTITLE.to_string(),
+                TIMEZONE_SEARCH_HINT.to_string(),
+                app.tz_query().to_string(),
+            ];
+            let shown = crate::preflight::filter_timezones(app.timezones(), app.tz_query(), 50);
+            if shown.is_empty() {
+                t.push(TIMEZONE_EMPTY.to_string());
+            }
+            t.extend(shown.into_iter().cloned());
+            t.push(BACK.to_string());
+            t.push(CONTINUE.to_string());
+            t
+        }
+        Page::Network => {
+            let mut t = vec![NETWORK_TITLE.to_string(), NETWORK_SUBTITLE.to_string()];
+            match app.net_online() {
+                None if app.net_checking() => t.push(NETWORK_CHECKING.to_string()),
+                Some(true) => t.push(NETWORK_ONLINE.to_string()),
+                _ => t.push(NETWORK_OFFLINE.to_string()),
+            }
+            t.push(NETWORK_RECHECK.to_string());
+            t.push(BACK.to_string());
+            if app.net_online() == Some(true) {
                 t.push(CONTINUE.to_string());
             }
             t
@@ -214,27 +383,76 @@ pub fn page_text(app: &TunaInstaller) -> Vec<String> {
             }
             t
         }
-        Page::Confirm => vec![
-            t_line("confirm_title"),
-            confirm_subtitle(),
-            t_disk(confirm_warn_key(app), &confirm_disk(app)),
-            t_line("confirm_body"),
-            CONFIRM_SUMMARY.to_string(),
-            CONFIRM_TARGET_DISK.to_string(),
-            confirm_disk(app),
-            OPTIONS_FILESYSTEM.to_string(),
-            recipe.filesystem.clone(),
-            OPTIONS_ENCRYPTION.to_string(),
-            encryption_text(&recipe.encryption.enc_type, "_label"),
-            OPTIONS_HOSTNAME.to_string(),
-            recipe.hostname.clone(),
-            ACCOUNT_USERNAME.to_string(),
-            app.username().to_string(),
-            CONFIRM_IMAGE.to_string(),
-            confirm_image(app),
-            BACK.to_string(),
-            t_line("confirm_button"),
-        ],
+        Page::Tour => {
+            // The current slide only: the carousel moves through the page,
+            // not past it.
+            let slides = app.tour_slides();
+            let mut t = vec![TOUR_TITLE.to_string()];
+            let here = crate::tour::clamp_index(app.tour_index(), slides.len());
+            if let Some(slide) = slides.get(here) {
+                if !slide.title.is_empty() {
+                    t.push(slide.title.clone());
+                }
+                if !slide.description.is_empty() {
+                    t.push(slide.description.clone());
+                }
+            }
+            t.push(TOUR_BACK.to_string());
+            t.push(CONTINUE.to_string());
+            t
+        }
+        Page::Companion => {
+            let mut t = vec![COMPANION_TITLE.to_string(), COMPANION_SUBTITLE.to_string()];
+            t.push(COMPANION_ADDRESS.to_string());
+            if let Some(port) = app.companion_port() {
+                let host = crate::phone::local_ip().unwrap_or_default();
+                t.push(format!("{host}:{port}"));
+                t.push(COMPANION_CODE.to_string());
+                t.push(app.companion_token().to_string());
+                t.push(COMPANION_COPY_LINK.to_string());
+            } else {
+                t.push(COMPANION_DOWN.to_string());
+            }
+            t.push(
+                if app.companion_applied() {
+                    COMPANION_APPLIED.to_string()
+                } else {
+                    COMPANION_WAITING.to_string()
+                },
+            );
+            t.push(BACK.to_string());
+            t.push(CONTINUE.to_string());
+            t
+        }
+        Page::Confirm => {
+            // Skipped account, skipped row: the image provides the user.
+            let confirm_user = if app.account_required() {
+                app.username().to_string()
+            } else {
+                CONFIRM_NO_ACCOUNT.to_string()
+            };
+            vec![
+                t_line("confirm_title"),
+                confirm_subtitle(),
+                t_disk(confirm_warn_key(app), &confirm_disk(app)),
+                t_line("confirm_body"),
+                CONFIRM_SUMMARY.to_string(),
+                CONFIRM_TARGET_DISK.to_string(),
+                confirm_disk(app),
+                OPTIONS_FILESYSTEM.to_string(),
+                recipe.filesystem.clone(),
+                OPTIONS_ENCRYPTION.to_string(),
+                encryption_text(&recipe.encryption.enc_type, "_label"),
+                OPTIONS_HOSTNAME.to_string(),
+                recipe.hostname.clone(),
+                ACCOUNT_USERNAME.to_string(),
+                confirm_user,
+                CONFIRM_IMAGE.to_string(),
+                confirm_image(app),
+                BACK.to_string(),
+                t_line("confirm_button"),
+            ]
+        }
         Page::Installing => vec![
             t_line("progress_title"),
             INSTALLING_SUBTITLE.to_string(),
@@ -351,10 +569,18 @@ pub fn view(app: &TunaInstaller) -> Element<'_, Message> {
             .into();
     }
     let content: Element<Message> = match app.page() {
+        Page::Requirements => requirements(app),
         Page::Welcome => welcome(app),
+        Page::Image => image_page(app),
+        Page::Language => language(app),
+        Page::Keyboard => keyboard(app),
+        Page::Timezone => timezone(app),
+        Page::Network => network(app),
         Page::DiskSelect => disk_select(app),
         Page::Options => options(app),
         Page::Account => account(app),
+        Page::Tour => tour_page(app),
+        Page::Companion => companion(app),
         Page::Confirm => confirm(app),
         Page::Installing => installing(app),
         Page::Done => done(app),
@@ -480,6 +706,518 @@ fn done_logo(fallback: &'static str) -> Element<'static, Message> {
         Some(handle) => artwork_icon(handle),
         None => widget::icon::from_name(fallback).size(64).icon().into(),
     }
+}
+
+/// Blocking hardware gates (BootcCpuWindow / BootcRamWindow /
+/// BootcUnsupportedWindow): one warning card per unmet requirement, not the
+/// inline line the welcome page used to carry. RAM and CPU offer "continue
+/// anyway"; unsupported firmware offers only power off (plus a firmware
+/// setup reboot, as the poweroff dialog does).
+fn requirements(app: &TunaInstaller) -> Element<'_, Message> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    let theme = cosmic::theme::active();
+    let gates = app.blocking_gates();
+    let may_continue = gates.is_empty();
+
+    let mut parts: Vec<Element<'_, Message>> = Vec::new();
+    for line in crate::probe::requirements_lines(app.unmet()) {
+        parts.push(
+            widget::container(
+                widget::row::with_children(vec![
+                    widget::icon::from_name("dialog-warning-symbolic")
+                        .size(16)
+                        .icon()
+                        .into(),
+                    widget::text::body(line)
+                        .class(cosmic::theme::Text::Color(
+                            theme.cosmic().warning_text_color().into(),
+                        ))
+                        .into(),
+                ])
+                .spacing(spacing.space_xs)
+                .align_y(Alignment::Center),
+            )
+            .class(cosmic::theme::Container::Card)
+            .padding(spacing.space_s)
+            .width(Length::Fill)
+            .into(),
+        );
+    }
+    if parts.is_empty() {
+        // Unreachable through navigation (the page is skipped without
+        // gates): say so instead of blanking.
+        parts.push(widget::text::body(REQUIREMENTS_READY_BODY).into());
+    }
+
+    let mut actions: Vec<Element<'_, Message>> = vec![widget::space::horizontal().into()];
+    // One gate at a time, as GNOME's one window per gate: the button
+    // overrides the first standing overridable gate, and the last one
+    // being overridden advances past the page (update OverrideGate).
+    if let Some(kind) = gates
+        .iter()
+        .copied()
+        .find(|g| crate::hardware::gate_overridable(*g))
+    {
+        actions.push(
+            widget::button::suggested(REQUIREMENTS_CONTINUE_ANYWAY)
+                .on_press(Message::OverrideGate(kind))
+                .into(),
+        );
+    }
+    actions.push(
+        widget::button::standard(REQUIREMENTS_FIRMWARE)
+            .on_press(Message::FirmwareSetup)
+            .into(),
+    );
+    actions.push(
+        widget::button::destructive(REQUIREMENTS_POWER_OFF)
+            .on_press(Message::PowerOff)
+            .into(),
+    );
+    parts.push(
+        widget::row::with_children(actions)
+            .spacing(spacing.space_s)
+            .into(),
+    );
+
+    let body = widget::scrollable(
+        widget::column::with_children(parts).spacing(spacing.space_s),
+    )
+    .height(Length::Fill);
+
+    page_frame(
+        if may_continue {
+            REQUIREMENTS_READY_TITLE
+        } else {
+            REQUIREMENTS_TITLE
+        },
+        // No gates, no alarm: the failed-requirement subtitle belongs to
+        // the blocking state only (this state is reachable in captures).
+        if may_continue {
+            ""
+        } else {
+            REQUIREMENTS_SUBTITLE
+        },
+        body.into(),
+        // The first page: no Back. Continue appears once gates clear.
+        nav_row(
+            None,
+            may_continue.then_some((CONTINUE.to_string(), Message::NextPage, false)),
+        ),
+    )
+}
+
+/// Image catalog (image.py / XFCE SourcePage): the leaves as a radio list
+/// in manifest order, plus the custom-URL row GNOME's page ends with.
+fn image_page(app: &TunaInstaller) -> Element<'_, Message> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+
+    let list: Element<Message> = if app.images().is_empty() {
+        widget::text::body(IMAGE_EMPTY).into()
+    } else {
+        let mut list = widget::list_column().style(cosmic::theme::Container::List);
+        for (i, leaf) in app.images().iter().enumerate() {
+            let mut label = widget::column::with_children(vec![
+                widget::text::body(leaf.name.clone()).into(),
+            ])
+            .spacing(spacing.space_xxxs)
+            .width(Length::Fill);
+            let caption = if leaf.description.is_empty() {
+                leaf.imgref.clone()
+            } else {
+                leaf.description.clone()
+            };
+            label = label.push(widget::text::caption(caption));
+            let row = widget::row::with_children(vec![
+                label.into(),
+                widget::radio(widget::text::body(""), i, app.selected_image(), Message::SelectImage)
+                    .into(),
+            ])
+            .align_y(Alignment::Center)
+            .spacing(spacing.space_s);
+            list = list.add(
+                widget::mouse_area(row)
+                    .on_press(Message::SelectImage(i)),
+            );
+        }
+        widget::scrollable(list.into_element())
+            .height(Length::Fill)
+            .into()
+    };
+
+    let custom = widget::settings::section()
+        .title(IMAGE_CUSTOM_LABEL)
+        .add(widget::settings::item(
+            IMAGE_CUSTOM_LABEL,
+            widget::text_input(IMAGE_CUSTOM_HINT, app.custom_image())
+                .on_input(Message::CustomImageChanged)
+                .width(Length::Fixed(320.0)),
+        ));
+
+    let body = widget::column::with_children(vec![list, custom.into()])
+        .spacing(spacing.space_m)
+        .height(Length::Fill);
+
+    // A choice is always pre-selected (the catalog default), but an empty
+    // catalog plus an empty custom URL installs nothing: hold Continue.
+    let chosen =
+        app.selected_image().is_some() || !app.custom_image().trim().is_empty();
+    page_frame(
+        IMAGE_TITLE,
+        IMAGE_SUBTITLE,
+        body.into(),
+        nav_row(
+            Some(Message::BackPage),
+            chosen.then_some((CONTINUE.to_string(), Message::NextPage, false)),
+        ),
+    )
+}
+
+/// One scrollable radio list over caller-provided rows, shared by the
+/// language and keyboard preflight pages.
+fn choice_list(
+    rows: Vec<String>,
+    selected: Option<usize>,
+    empty: &str,
+    on_pick: fn(usize) -> Message,
+) -> Element<'static, Message> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    if rows.is_empty() {
+        return widget::text::body(empty.to_string()).into();
+    }
+    let mut list = widget::list_column().style(cosmic::theme::Container::List);
+    for (i, row) in rows.into_iter().enumerate() {
+        let label = widget::column::with_children(vec![widget::text::body(row).into()])
+            .spacing(spacing.space_xxxs)
+            .width(Length::Fill);
+        let item = widget::row::with_children(vec![
+            label.into(),
+            widget::radio(widget::text::body(""), i, selected, on_pick).into(),
+        ])
+        .align_y(Alignment::Center)
+        .spacing(spacing.space_s);
+        list = list.add(widget::mouse_area(item).on_press(on_pick(i)));
+    }
+    widget::scrollable(list.into_element())
+        .height(Length::Fill)
+        .into()
+}
+
+/// Locale preflight (language.py). Preflight, not a gate: a missing or
+/// unapplied list never holds Continue.
+fn language(app: &TunaInstaller) -> Element<'_, Message> {
+    page_frame(
+        LANGUAGE_TITLE,
+        LANGUAGE_SUBTITLE,
+        choice_list(
+            app.locales().to_vec(),
+            app.selected_locale(),
+            LANGUAGE_EMPTY,
+            Message::SelectLocale,
+        ),
+        nav_row(
+            Some(Message::BackPage),
+            Some((CONTINUE.to_string(), Message::NextPage, false)),
+        ),
+    )
+}
+
+/// Keyboard preflight (keyboard.py). Selecting applies via localectl on
+/// the host, best-effort — the install does not depend on it.
+fn keyboard(app: &TunaInstaller) -> Element<'_, Message> {
+    page_frame(
+        KEYBOARD_TITLE,
+        KEYBOARD_SUBTITLE,
+        choice_list(
+            app.keymaps().to_vec(),
+            app.selected_keymap(),
+            KEYBOARD_EMPTY,
+            Message::SelectKeymap,
+        ),
+        nav_row(
+            Some(Message::BackPage),
+            Some((CONTINUE.to_string(), Message::NextPage, false)),
+        ),
+    )
+}
+
+/// Timezone preflight (timezone.py): a search field over the
+/// `timedatectl list-timezones` list, capped so the page stays a page.
+fn timezone(app: &TunaInstaller) -> Element<'_, Message> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    let shown = crate::preflight::filter_timezones(app.timezones(), app.tz_query(), 50);
+    let actual: Vec<usize> = shown
+        .iter()
+        .filter_map(|z| app.timezones().iter().position(|t| t == *z))
+        .collect();
+    let rows: Vec<String> = shown.into_iter().cloned().collect();
+    let selected = app.selected_timezone();
+
+    let list: Element<Message> = if app.timezones().is_empty() || rows.is_empty() {
+        widget::text::body(TIMEZONE_EMPTY).into()
+    } else {
+        let mut list = widget::list_column().style(cosmic::theme::Container::List);
+        for (row, zone) in rows.into_iter().enumerate() {
+            let actual_idx = actual.get(row).copied().unwrap_or(0);
+            let is_selected = selected == Some(actual_idx);
+            let label = widget::column::with_children(vec![widget::text::body(zone).into()])
+                .spacing(spacing.space_xxxs)
+                .width(Length::Fill);
+            let item = widget::row::with_children(vec![
+                label.into(),
+                widget::radio(
+                    widget::text::body(""),
+                    actual_idx,
+                    is_selected.then_some(actual_idx),
+                    Message::SelectTimezone,
+                )
+                .into(),
+            ])
+            .align_y(Alignment::Center)
+            .spacing(spacing.space_s);
+            list = list.add(
+                widget::mouse_area(item).on_press(Message::SelectTimezone(actual_idx)),
+            );
+        }
+        widget::scrollable(list.into_element())
+            .height(Length::Fill)
+            .into()
+    };
+
+    // A picked zone stays picked while the query changes; typing a query
+    // that excludes it does not unpick it.
+    let body = widget::column::with_children(vec![
+        widget::text_input(TIMEZONE_SEARCH_HINT, app.tz_query())
+            .on_input(Message::TimezoneQueryChanged)
+            .width(Length::Fill)
+            .into(),
+        list,
+    ])
+    .spacing(spacing.space_s)
+    .height(Length::Fill);
+
+    page_frame(
+        TIMEZONE_TITLE,
+        TIMEZONE_SUBTITLE,
+        body.into(),
+        nav_row(
+            Some(Message::BackPage),
+            Some((CONTINUE.to_string(), Message::NextPage, false)),
+        ),
+    )
+}
+
+/// Connectivity preflight (conn_check.py): GNOME's check (ghcr.io:443,
+/// then 8.8.8.8:53) with its Recheck button. Unlike the locale pages this
+/// one holds Continue until the check passes — an offline install cannot
+/// fetch anything. Live media skips the page instead.
+fn network(app: &TunaInstaller) -> Element<'_, Message> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+
+    let mut parts: Vec<Element<'_, Message>> = Vec::new();
+    match app.net_online() {
+        None if app.net_checking() => {
+            parts.push(
+                widget::progress_bar::indeterminate_linear()
+                    .width(Length::Fill)
+                    .into(),
+            );
+            parts.push(widget::text::body(NETWORK_CHECKING).into());
+        }
+        Some(true) => {
+            parts.push(
+                widget::row::with_children(vec![
+                    widget::icon::from_name("emblem-ok-symbolic")
+                        .size(16)
+                        .icon()
+                        .into(),
+                    widget::text::body(NETWORK_ONLINE).into(),
+                ])
+                .spacing(spacing.space_xs)
+                .align_y(Alignment::Center)
+                .into(),
+            );
+        }
+        _ => {
+            parts.push(widget::text::body(NETWORK_OFFLINE).into());
+        }
+    }
+    let mut recheck = widget::button::standard(NETWORK_RECHECK);
+    if !app.net_checking() {
+        recheck = recheck.on_press(Message::RecheckNetwork);
+    }
+    parts.push(recheck.into());
+
+    let body = widget::column::with_children(parts)
+        .spacing(spacing.space_s)
+        .height(Length::Fill);
+
+    page_frame(
+        NETWORK_TITLE,
+        NETWORK_SUBTITLE,
+        body.into(),
+        nav_row(
+            Some(Message::BackPage),
+            (app.net_online() == Some(true))
+                .then_some((CONTINUE.to_string(), Message::NextPage, false)),
+        ),
+    )
+}
+
+/// Tour carousel (views/tour.py): the selected image's slides, one per
+/// screen, Back stepping within the slides. The last Next leaves the page.
+fn tour_page(app: &TunaInstaller) -> Element<'_, Message> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    let slides = app.tour_slides();
+    let mut children: Vec<Element<'_, Message>> = vec![widget::space::vertical().into()];
+    if let Some(slide) = slides.get(crate::tour::clamp_index(app.tour_index(), slides.len())) {
+        // A bundled asset file draws; a GResource URI is a GNOME-packaging
+        // concept this frontend cannot read, so it is left out rather than
+        // drawn as a broken image.
+        if crate::tour::is_local_asset(&slide.image) {
+            let path = std::path::PathBuf::from(&slide.image);
+            if path.is_file() {
+                children.push(
+                    widget::icon::from_path(path)
+                        .icon()
+                        .size(256)
+                        .content_fit(cosmic::iced::ContentFit::Contain)
+                        .into(),
+                );
+            }
+        }
+        if !slide.title.is_empty() {
+            children.push(
+                widget::text::title2(slide.title.clone())
+                    .into(),
+            );
+        }
+        if !slide.description.is_empty() {
+            children.push(widget::text::body(slide.description.clone()).into());
+        }
+        children.push(
+            widget::text::caption(format!("{} / {}", app.tour_index() + 1, slides.len())).into(),
+        );
+    }
+    children.push(widget::space::vertical().into());
+    let hero = widget::column::with_children(children)
+        .spacing(spacing.space_s)
+        .align_x(Alignment::Center)
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    page_frame(
+        TOUR_TITLE,
+        "",
+        hero.into(),
+        nav_row(
+            Some(Message::TourBack),
+            Some((CONTINUE.to_string(), Message::TourNext, false)),
+        ),
+    )
+}
+
+/// Phone companion (phone_companion.py / qr_companion.py): serve the LAN
+/// form, show host:port and the pairing code, and copy the full link on
+/// demand. The token rides in the URL, so the URL itself is never shown as
+/// text — as on the GNOME page.
+fn companion(app: &TunaInstaller) -> Element<'_, Message> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+
+    let status = if app.companion_applied() {
+        COMPANION_APPLIED
+    } else {
+        COMPANION_WAITING
+    };
+    let mut copy = widget::button::standard(COMPANION_COPY_LINK);
+    if app.companion_port().is_some() {
+        copy = copy.on_press(Message::CopyPairingLink);
+    }
+
+    let body = widget::column::with_children(vec![
+        widget::text::body(COMPANION_SUBTITLE).into(),
+        widget::settings::view_column(vec![widget::settings::section()
+            .title(COMPANION_ADDRESS)
+            .add(widget::settings::item(
+                COMPANION_ADDRESS,
+                widget::text::monotext(match app.companion_port() {
+                    Some(port) => {
+                        let host = crate::phone::local_ip().unwrap_or_default();
+                        format!("{host}:{port}")
+                    }
+                    None => COMPANION_DOWN.to_string(),
+                }),
+            ))
+            .add(widget::settings::item(
+                COMPANION_CODE,
+                widget::text::monotext(app.companion_token().to_string()),
+            ))
+            .into()])
+        .spacing(spacing.space_m)
+        .into(),
+        widget::text::caption(status).into(),
+        copy.into(),
+    ])
+    .spacing(spacing.space_s)
+    .height(Length::Fill);
+
+    page_frame(
+        COMPANION_TITLE,
+        "",
+        body.into(),
+        nav_row(
+            Some(Message::BackPage),
+            Some((CONTINUE.to_string(), Message::NextPage, false)),
+        ),
+    )
+}
+
+/// The exit confirm (BootcWindow.__on_exit_clicked): leaving loses
+/// progress, and leaving mid-install stops the install.
+pub fn exit_confirm(app: &TunaInstaller) -> Element<'_, Message> {
+    let spacing = cosmic::theme::active().cosmic().spacing;
+    let body_text = if app.installing() {
+        EXIT_BODY_INSTALLING
+    } else {
+        EXIT_BODY
+    };
+    let body = widget::column::with_children(vec![
+        widget::space::vertical().into(),
+        widget::text::body(body_text).into(),
+        widget::space::vertical().into(),
+    ])
+    .spacing(spacing.space_s)
+    .align_x(Alignment::Center)
+    .width(Length::Fill)
+    .height(Length::Fill);
+
+    let footer = widget::row::with_children(vec![
+        widget::space::horizontal().into(),
+        widget::button::standard(EXIT_CANCEL)
+            .on_press(Message::CancelQuit)
+            .into(),
+        widget::button::destructive(EXIT_CONFIRM)
+            .on_press(Message::ConfirmQuit)
+            .into(),
+    ])
+    .spacing(spacing.space_s)
+    .align_y(Alignment::Center);
+
+    widget::container(
+        widget::column::with_children(vec![
+            widget::text::title2(EXIT_TITLE).into(),
+            widget::divider::horizontal::default().into(),
+            body.into(),
+            widget::divider::horizontal::default().into(),
+            footer.into(),
+        ])
+        .spacing(spacing.space_s)
+        .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(spacing.space_l)
+    .into()
 }
 
 fn welcome(app: &TunaInstaller) -> Element<'_, Message> {
@@ -811,7 +1549,11 @@ fn confirm(app: &TunaInstaller) -> Element<'_, Message> {
         ))
         .add(widget::settings::item(
             ACCOUNT_USERNAME,
-            widget::text::body(app.username().to_string()),
+            widget::text::body(if app.account_required() {
+                app.username().to_string()
+            } else {
+                CONFIRM_NO_ACCOUNT.to_string()
+            }),
         ))
         .add(widget::settings::item(CONFIRM_IMAGE, widget::text::body(image)));
 
@@ -930,7 +1672,12 @@ fn installing(app: &TunaInstaller) -> Element<'_, Message> {
         t_line("progress_title"),
         INSTALLING_SUBTITLE,
         body.into(),
-        widget::space::horizontal().into(),
+        // dialog_output's copy affordance: the log is the diagnosis, and a
+        // failed install is exactly when it is needed.
+        nav_row(
+            None,
+            Some((DONE_COPY_LOG.to_string(), Message::CopyLog, false)),
+        ),
     )
 }
 
@@ -1014,6 +1761,9 @@ fn done(app: &TunaInstaller) -> Element<'_, Message> {
         }
         widget::row::with_children(vec![
             widget::space::horizontal().into(),
+            widget::button::standard(DONE_COPY_LOG)
+                .on_press(Message::CopyLog)
+                .into(),
             widget::button::standard(DONE_CLOSE)
                 .on_press(Message::Quit)
                 .into(),
@@ -1022,7 +1772,17 @@ fn done(app: &TunaInstaller) -> Element<'_, Message> {
         .spacing(spacing.space_s)
         .into()
     } else {
-        nav_row(None, Some((DONE_CLOSE.to_string(), Message::Quit, false)))
+        widget::row::with_children(vec![
+            widget::space::horizontal().into(),
+            widget::button::standard(DONE_COPY_LOG)
+                .on_press(Message::CopyLog)
+                .into(),
+            widget::button::suggested(DONE_CLOSE)
+                .on_press(Message::Quit)
+                .into(),
+        ])
+        .spacing(spacing.space_s)
+        .into()
     };
 
     let mut children: Vec<Element<'_, Message>> = vec![

@@ -39,6 +39,10 @@ set(BACKEND_SOURCES
     src/log.h
     src/recipe.cpp
     src/recipe.h
+    src/imagecatalog.cpp
+    src/imagecatalog.h
+    src/region.cpp
+    src/region.h
     src/offline.cpp
     src/offline.h
     src/branding.cpp
@@ -141,6 +145,8 @@ if(BUILD_TESTING)
         tests/test_backend.cpp
         src/log.cpp
         src/recipe.cpp
+        src/imagecatalog.cpp
+        src/region.cpp
         src/branding.cpp
         src/offline.cpp
         src/readiness.cpp

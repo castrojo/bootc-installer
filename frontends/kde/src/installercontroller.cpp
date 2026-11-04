@@ -3,15 +3,22 @@
 #include "log.h"
 #include "offline.h"
 #include "branding.h"
+#include "region.h"
 
+#include <QClipboard>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMetaObject>
 #include <QRegularExpression>
 #include <QStandardPaths>
+
+#include <thread>
 
 InstallerController::InstallerController(QObject *parent)
     : QObject(parent)
@@ -40,6 +47,46 @@ InstallerController::InstallerController(QObject *parent)
         m_branding.assets.value(QStringLiteral("complete_image")), offline::inFlatpak()).source();
     m_recipe.distroID = m_branding.id;
     m_recipe.hostname = m_branding.defaultHostname;
+    m_defaultHostname = m_branding.defaultHostname;
+    m_offlineImages = facts.offlineImages;
+
+    // The image catalog selects the recipe's image, its per-image fields and
+    // whether the account step is needed. Live media keeps the empty image
+    // (fisherman installs the running system) and only reads the user flag:
+    // a live manifest is typically a single image, as in user.py.
+    m_catalog = imagecatalog::load();
+    if (!m_recipe.liveMode) {
+        int def = -1;
+        for (int i = 0; i < m_catalog.leaves.size(); ++i) {
+            if (m_catalog.leaves.at(i).imgref == m_catalog.defaultImage) {
+                def = i;
+                break;
+            }
+        }
+        if (def >= 0)
+            selectCatalogImage(def);
+    } else if (!m_catalog.leaves.isEmpty()) {
+        m_needsUser = m_catalog.leaves.first().needsUserCreation;
+        m_recipe.userRequired = m_needsUser;
+    }
+
+    // Region & language preflight defaults: the live session's own values.
+    m_language = region::systemLanguage();
+    m_keyboardLayout = region::systemKeyboardLayout();
+    m_timezone = region::systemTimezone();
+    for (const region::Language &l : region::availableLanguages()) {
+        m_languageIds << l.id;
+        m_languageNames << l.display;
+    }
+    if (!m_languageIds.contains(m_language) && !m_languageIds.isEmpty())
+        m_language = m_languageIds.first();
+    for (const region::Keymap &k : region::availableKeyboardLayouts()) {
+        m_keyboardIds << k.id;
+        m_keyboardNames << k.description;
+    }
+    m_timezones = region::availableTimezones();
+    if (!m_timezones.contains(m_timezone))
+        m_timezone = QStringLiteral("UTC");
 
     // One check at a time, after a pause in the changes.
     m_validateTimer.setSingleShot(true);
@@ -210,6 +257,173 @@ void InstallerController::setImage(const QString &v)
         return;
     m_recipe.image = v;
     Q_EMIT recipeChanged();
+}
+
+QStringList InstallerController::catalogNames() const
+{
+    QStringList out;
+    for (const imagecatalog::Leaf &leaf : m_catalog.leaves)
+        out << leaf.name;
+    return out;
+}
+
+QStringList InstallerController::catalogImgrefs() const
+{
+    QStringList out;
+    for (const imagecatalog::Leaf &leaf : m_catalog.leaves)
+        out << leaf.imgref;
+    return out;
+}
+
+QStringList InstallerController::catalogDescs() const
+{
+    QStringList out;
+    for (const imagecatalog::Leaf &leaf : m_catalog.leaves)
+        out << leaf.desc;
+    return out;
+}
+
+void InstallerController::selectCatalogImage(int index)
+{
+    // Live media installs the running system: the catalog only informs the
+    // user flag there (see the constructor), never the image.
+    if (m_recipe.liveMode)
+        return;
+    if (index < 0 || index >= m_catalog.leaves.size() || index == m_catalogIndex)
+        return;
+    const imagecatalog::Leaf &leaf = m_catalog.leaves.at(index);
+    m_catalogIndex = index;
+    m_recipe.image = leaf.imgref;
+    m_recipe.targetImgref = leaf.imgref;
+    if (!leaf.bootloader.isEmpty())
+        m_recipe.bootloader = leaf.bootloader;
+    m_recipe.composeFsBackend = leaf.composefs;
+    // Inline lists only. A URL source needs the fetch the GNOME step does at
+    // click time; leaving flatpaks empty keeps fisherman's fallback, the same
+    // default a leaf without flatpaks gets everywhere.
+    m_recipe.flatpaks.clear();
+    if (!leaf.flatpakSource.isEmpty() && !leaf.flatpakSource.startsWith(QStringLiteral("http"))) {
+        const QJsonArray list =
+            QJsonDocument::fromJson(leaf.flatpakSource.toUtf8()).array();
+        for (const QJsonValue &v : list) {
+            if (v.isString())
+                m_recipe.flatpaks << v.toString();
+        }
+    }
+    // A catalog default_hostname seeds the field; a hostname the user (or the
+    // branding) already set wins.
+    if (!leaf.defaultHostname.isEmpty() && m_recipe.hostname == m_defaultHostname)
+        m_recipe.hostname = leaf.defaultHostname;
+    m_needsUser = leaf.needsUserCreation;
+    m_recipe.userRequired = leaf.needsUserCreation;
+    m_tourSlides = leaf.carousel;
+    Q_EMIT catalogChanged();
+    Q_EMIT recipeChanged();
+}
+
+void InstallerController::setContinueAnyway(bool v)
+{
+    if (m_continueAnyway == v)
+        return;
+    m_continueAnyway = v;
+    Q_EMIT continueAnywayChanged();
+}
+
+void InstallerController::setLanguage(const QString &v)
+{
+    if (m_language == v)
+        return;
+    m_language = v;
+    Q_EMIT regionChanged();
+}
+
+void InstallerController::setKeyboardLayout(const QString &v)
+{
+    if (m_keyboardLayout == v)
+        return;
+    m_keyboardLayout = v;
+    Q_EMIT regionChanged();
+}
+
+void InstallerController::setTimezone(const QString &v)
+{
+    if (m_timezone == v)
+        return;
+    m_timezone = v;
+    Q_EMIT regionChanged();
+}
+
+QString InstallerController::timezoneDisplay(const QString &ianaId) const
+{
+    return region::timezoneDisplay(ianaId);
+}
+
+bool InstallerController::needsNetwork() const
+{
+    // Live media installs the running system; an image already in the host's
+    // offline stores needs no download. Mirrors conn_check.py's skip.
+    return !m_recipe.liveMode && !m_offlineImages.contains(m_recipe.image);
+}
+
+void InstallerController::checkConnectivity()
+{
+    if (m_checkingOnline)
+        return;
+    m_checkingOnline = true;
+    Q_EMIT onlineChanged();
+    std::thread([this]() {
+        const bool ok = region::networkReachable();
+        QMetaObject::invokeMethod(
+            this,
+            [this, ok]() {
+                m_checkingOnline = false;
+                m_online = ok;
+                m_onlineKnown = true;
+                Q_EMIT onlineChanged();
+            },
+            Qt::QueuedConnection);
+    }).detach();
+}
+
+void InstallerController::poweroff()
+{
+    // Same host path as the install and the reboot: flatpak-spawn --host
+    // when sandboxed. Mirrors dialog_poweroff.py's host systemctl call.
+    QStringList argv = offline::hostCommand({QStringLiteral("systemctl"), QStringLiteral("poweroff")});
+    const QString program = argv.takeFirst();
+#if QT_CONFIG(process)
+    QProcess::startDetached(program, argv);
+#else
+    qCWarning(logInstaller) << "this build cannot start processes, not running" << program;
+#endif
+}
+
+void InstallerController::copyLogToClipboard()
+{
+    QClipboard *clipboard = QGuiApplication::clipboard();
+    if (!clipboard) {
+        qCWarning(logInstaller) << "no clipboard: cannot copy the install log";
+        return;
+    }
+    clipboard->setText(m_log);
+}
+
+void InstallerController::cancelInstall()
+{
+#if QT_CONFIG(process)
+    // Nothing running: leaving the page is enough, there is nothing to kill.
+    if (!m_process)
+        return;
+    appendLine(QStringLiteral("Cancelling installation..."));
+    // SIGTERM first: fisherman exits when its parent dies (fisherman#267),
+    // so terminating the wrapper *is* the cancel. SIGKILL after five seconds
+    // if it does not go — the finished handler reports either outcome.
+    m_process->terminate();
+    QTimer::singleShot(5000, this, [this]() {
+        if (m_process)
+            m_process->kill();
+    });
+#endif
 }
 
 void InstallerController::setUsername(const QString &v)
