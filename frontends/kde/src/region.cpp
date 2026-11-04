@@ -5,6 +5,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QTimeZone>
+#include <QtGlobal>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -148,16 +149,29 @@ QString systemKeyboardLayout()
 QStringList availableTimezones()
 {
     QStringList out;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    // Qt 6.9 moved the IANA ID APIs from QByteArray to QString, so the
+    // wasm build (Qt 6.9.3) needs the QString spellings while the 6.4/6.5
+    // desktop builds keep the old ones.
+    for (const QString &id : QTimeZone::availableTimeZoneIds())
+        out << id;
+#else
     for (const QByteArray &id : QTimeZone::availableTimeZoneIds())
         out << QString::fromLatin1(id);
+#endif
     out.sort();
     return out;
 }
 
 QString systemTimezone()
 {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    const QString id = QTimeZone::systemTimeZone().id();
+    return id.isEmpty() ? QStringLiteral("UTC") : id;
+#else
     const QByteArray id = QTimeZone::systemTimeZoneId();
     return id.isEmpty() ? QStringLiteral("UTC") : QString::fromLatin1(id);
+#endif
 }
 
 QString timezoneDisplay(const QString &ianaId)

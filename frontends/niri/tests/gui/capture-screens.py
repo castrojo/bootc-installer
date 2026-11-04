@@ -441,6 +441,10 @@ def main():
         "logoValue": QUrl.fromLocalFile(os.path.abspath(logo_path)).toString(),
     })
     root.setProperty("recoveryKey", "")
+    # The capture fixture leaves ram+cpu unmet so the screenshots show the
+    # blocking gate dialog on welcome. Dismiss it here: the grabs below
+    # photograph the logo, and the dialog would cover it.
+    root.setProperty("gatesAccepted", True)
     for page, name in [(0, "welcomeBrandingLogo"), (DONE_PAGE, "doneBrandingLogo")]:
         root.setProperty("currentPage", page)
         root.setProperty("installSuccess", True)
