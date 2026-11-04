@@ -33,6 +33,18 @@ func installLogDir() string {
 	return filepath.Join(home, ".local", "state", "tuna-installer")
 }
 
+// installLogDisplayPath is the file openInstallLog appends to, for `detect`
+// ("logPath") and `log-path`: the QML names it next to its Copy button, the
+// way dialog_output.py shows the same file. "" when no home is known — a
+// log path the UI cannot name is a missing affordance, not a failure.
+func installLogDisplayPath() string {
+	dir := installLogDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "install.log")
+}
+
 // openInstallLog opens the persistent install log for appending, creating
 // its directory if needed. Appending (not truncating) keeps an earlier
 // failed attempt's output on disk instead of overwriting it when the user

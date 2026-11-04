@@ -12,7 +12,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 )
 
 func inFlatpak() bool {
@@ -54,9 +53,4 @@ func hostCommand(argv ...string) []string {
 		return append([]string{"flatpak-spawn", "--host"}, argv...)
 	}
 	return argv
-}
-
-func runHost(argv ...string) ([]byte, error) {
-	cmd := hostCommand(argv...)
-	return exec.Command(cmd[0], cmd[1:]...).Output()
 }

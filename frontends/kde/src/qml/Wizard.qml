@@ -99,8 +99,31 @@ Kirigami.Page {
         }
     }
 
+    // A step that has nothing to ask: the account step when the selected
+    // catalog image creates its own first user (needs_user_creation, the
+    // GNOME image step and XFCE IdentityPage rule). The step is never
+    // *landed on* by Next/Back, but it stays in the model — and reachable
+    // by goToStep — so the seven-module shape and the harness walk survive.
+    function stepSkipped(index: int): bool {
+        return stepsModel.get(index).stepId === "account"
+            && !InstallerController.needsUserCreation;
+    }
+
     function requestNextPage(): void {
-        if (animating || currentIndex + 1 >= stepCount) {
+        if (animating) {
+            return;
+        }
+        let target = currentIndex + 1;
+        while (target < stepCount && stepSkipped(target)) {
+            target++;
+        }
+        if (target >= stepCount) {
+            return;
+        }
+        if (target !== currentIndex + 1) {
+            // A jump, not a slide: the slide animation below assumes
+            // adjacent steps. Skips are rare (the account step only).
+            goToStep(target);
             return;
         }
 
@@ -120,7 +143,18 @@ Kirigami.Page {
     }
 
     function requestPreviousPage(): void {
-        if (animating || currentIndex === 0) {
+        if (animating) {
+            return;
+        }
+        let target = currentIndex - 1;
+        while (target >= 0 && stepSkipped(target)) {
+            target--;
+        }
+        if (target < 0) {
+            return;
+        }
+        if (target !== currentIndex - 1) {
+            goToStep(target);
             return;
         }
 

@@ -1,4 +1,6 @@
 #include "offline.h"
+#include "imagecatalog.h"
+#include "region.h"
 #include "branding.h"
 #include "branding_defaults.h"
 #include "readiness.h"
@@ -93,6 +95,34 @@ private slots:
     void validateAnswersBecomeCopyLines();
     void validateSendsAPartialRecipeOnStdin();
     void liveMediaComesFromTheProbe();
+
+    // The image catalog (fisherman's images.json, resolved like the GNOME and
+    // XFCE frontends resolve it): tag+registry composition, ancestor
+    // inheritance, @alias resolution, and the needs_user_creation default.
+    void catalogParseComposesTagsAndInherits();
+    void catalogParseRejectsGarbage();
+    void catalogLoadPrefersTheEnvOverride();
+    void catalogSelectionDrivesTheRecipeAndTheUserStep();
+    void catalogAbsentMeansAccountRequired();
+
+    // The user block follows the account step: omitted when the selected
+    // image creates its own first user, even with a typed username.
+    void recipeUserOmittedWhenNotRequired();
+
+    // The hardware gates (the GNOME cpu/ram/unsupported windows): fatal on
+    // uefi, overridable on ram/cpu, absent when everything is met.
+    void requirementsGates();
+    void cancelInstallWithoutAProcessIsANoOp();
+    void copyLogWithoutAClipboardIsANoOp();
+
+    // Region & language preflight data comes from the platform, not from a
+    // bundled copy: Qt's locale database, the XKB list, QTimeZone.
+    void regionListsComeFromThePlatform();
+    void regionTimezoneDisplay();
+    void regionRejectsUnreachableHosts();
+
+    // The done screen's tour is the selected leaf's carousel slides.
+    void tourSlidesFollowTheSelection();
 };
 
 void BackendTest::recipeDefaults()
@@ -1147,6 +1177,288 @@ void BackendTest::wrapperLeadsItsOwnProcessGroup()
     QVERIFY(p.waitForFinished(5000));
     QCOMPARE(p.exitStatus(), QProcess::CrashExit);
 #endif
+}
+
+// A two-group manifest exercising every resolution the loader mirrors from
+// the GNOME tree: @alias, tag+registry composition, ancestor inheritance of
+// needs_user_creation/flatpaks/bootloader, and a group carousel.
+static QByteArray catalogFixture()
+{
+    return QByteArrayLiteral(
+        R"({"aliases": {"brew": "https://example.com/brew.flatpakref"},
+            "default_image": "ghcr.io/example/blue:stable",
+            "fallback_flatpaks": ["org.example.Base"],
+            "images": [
+              {"name": "Blue", "registry": "ghcr.io/example/blue",
+               "flatpaks": "@brew", "bootloader": "systemd",
+               "needs_user_creation": true,
+               "carousel": [{"title": "Welcome", "description": "Tour blue"}],
+               "children": [
+                 {"name": "Stable", "tag": "stable"},
+                 {"name": "Beta", "tag": "beta", "needs_user_creation": false,
+                  "desc": "Preview"}
+               ]},
+              {"name": "Red", "imgref": "ghcr.io/example/red:latest",
+               "desc": "The red one", "needs_user_creation": false}
+            ]})");
+}
+
+void BackendTest::catalogParseComposesTagsAndInherits()
+{
+    const imagecatalog::Catalog catalog = imagecatalog::parse(catalogFixture());
+    QCOMPARE(catalog.defaultImage, QStringLiteral("ghcr.io/example/blue:stable"));
+    QCOMPARE(catalog.fallbackFlatpaks, QStringList{QStringLiteral("org.example.Base")});
+    QCOMPARE(catalog.leaves.size(), 3);
+
+    // tag+registry composition, with the group-qualified display name.
+    const imagecatalog::Leaf stable = catalog.leaves.at(0);
+    QCOMPARE(stable.imgref, QStringLiteral("ghcr.io/example/blue:stable"));
+    QCOMPARE(stable.name, QStringLiteral("Blue — Stable"));
+    // Inherited from the group: the @alias flatpaks, the bootloader, the
+    // user flag — and the group's carousel slides.
+    QCOMPARE(stable.flatpakSource, QStringLiteral("https://example.com/brew.flatpakref"));
+    QCOMPARE(stable.bootloader, QStringLiteral("systemd"));
+    QVERIFY(stable.needsUserCreation);
+    QCOMPARE(stable.carousel.size(), 1);
+    QCOMPARE(stable.carousel.first().toMap().value(QStringLiteral("title")).toString(),
+             QStringLiteral("Welcome"));
+
+    // A leaf-level override wins over the inherited flag.
+    const imagecatalog::Leaf beta = catalog.leaves.at(1);
+    QCOMPARE(beta.imgref, QStringLiteral("ghcr.io/example/blue:beta"));
+    QVERIFY(!beta.needsUserCreation);
+    QCOMPARE(beta.desc, QStringLiteral("Preview"));
+    QVERIFY(beta.searchText.contains(QStringLiteral("blue")));
+    QVERIFY(beta.searchText.contains(QStringLiteral("beta")));
+
+    // A full imgref needs no registry. (The bare-leaf default of true is
+    // pinned by catalogParseRejectsGarbage below.)
+    const imagecatalog::Leaf red = catalog.leaves.at(2);
+    QCOMPARE(red.imgref, QStringLiteral("ghcr.io/example/red:latest"));
+    QVERIFY(!red.needsUserCreation); // explicit false in the fixture
+}
+
+void BackendTest::catalogParseRejectsGarbage()
+{
+    QVERIFY(imagecatalog::parse(QByteArrayLiteral("not json")).leaves.isEmpty());
+    QVERIFY(imagecatalog::parse(QByteArrayLiteral("[]")).leaves.isEmpty());
+    QVERIFY(imagecatalog::parse(QByteArrayLiteral("{}")).leaves.isEmpty());
+    // A tag without any registry in scope is not selectable, and a
+    // needs_user_creation default of true applies to a bare imgref leaf.
+    const imagecatalog::Catalog catalog = imagecatalog::parse(
+        QByteArrayLiteral(R"({"images": [{"name": "Lonely", "tag": "x"},
+                                         {"name": "Bare", "imgref": "example/bare:1"}]})"));
+    QCOMPARE(catalog.leaves.size(), 1);
+    QCOMPARE(catalog.leaves.first().imgref, QStringLiteral("example/bare:1"));
+    QVERIFY(catalog.leaves.first().needsUserCreation);
+}
+
+void BackendTest::catalogLoadPrefersTheEnvOverride()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QFile manifest(dir.filePath(QStringLiteral("images.json")));
+    QVERIFY(manifest.open(QIODevice::WriteOnly));
+    manifest.write(catalogFixture());
+    manifest.close();
+
+    qputenv(imagecatalog::IMAGES_ENV, dir.filePath(QStringLiteral("images.json")).toUtf8());
+    const imagecatalog::Catalog catalog = imagecatalog::load();
+    qunsetenv(imagecatalog::IMAGES_ENV);
+    QCOMPARE(catalog.leaves.size(), 3);
+    QVERIFY2(imagecatalog::defaultSearchPaths(false).contains(
+                 QStringLiteral("/etc/tuna-installer/images.json")),
+             "the XFCE search path is mirrored");
+    QVERIFY2(imagecatalog::defaultSearchPaths(false).contains(
+                 QStringLiteral("/etc/bootc-installer/images.json")),
+             "the GNOME live-ISO fallback is mirrored");
+    QVERIFY2(imagecatalog::defaultSearchPaths(true).contains(
+                 QStringLiteral("/run/host/etc/tuna-installer/images.json")),
+             "the Flatpak host /etc prefix is applied");
+    QVERIFY(!imagecatalog::defaultSearchPaths(false).contains(
+        QStringLiteral("/run/host/etc/tuna-installer/images.json")));
+}
+
+void BackendTest::catalogSelectionDrivesTheRecipeAndTheUserStep()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QFile manifest(dir.filePath(QStringLiteral("images.json")));
+    QVERIFY(manifest.open(QIODevice::WriteOnly));
+    manifest.write(catalogFixture());
+    manifest.close();
+    qputenv(imagecatalog::IMAGES_ENV, dir.filePath(QStringLiteral("images.json")).toUtf8());
+    InstallerController c;
+    qunsetenv(imagecatalog::IMAGES_ENV);
+
+    QVERIFY(c.hasCatalog());
+    QCOMPARE(c.catalogNames().size(), 3);
+    // The constructor preselects the manifest's default_image.
+    QCOMPARE(c.catalogIndex(), 0);
+    QCOMPARE(c.image(), QStringLiteral("ghcr.io/example/blue:stable"));
+    QVERIFY(c.needsUserCreation());
+
+    QSignalSpy picked(&c, &InstallerController::catalogChanged);
+    c.setUsername(QStringLiteral("alex"));
+    c.setUserPassword(QStringLiteral("pw"));
+    // The beta leaf creates its own first user: the account step is skipped
+    // and the recipe omits the block even with a typed username.
+    c.selectCatalogImage(1);
+    QCOMPARE(c.image(), QStringLiteral("ghcr.io/example/blue:beta"));
+    QVERIFY(!c.needsUserCreation());
+    QVERIFY(!c.recipe().toJson().contains(QStringLiteral("user")));
+    // The group inheritance travelled into the recipe: systemd bootloader,
+    // no composefs, and no flatpaks (the leaf's source is a URL, which keeps
+    // fisherman's fallback — see selectCatalogImage).
+    QCOMPARE(c.recipe().bootloader, QStringLiteral("systemd"));
+    QVERIFY(!c.recipe().composeFsBackend);
+    QVERIFY(c.recipe().flatpaks.isEmpty());
+    QVERIFY(!c.tourSlides().isEmpty());
+    // Out-of-range and repeated selections are ignored, not errors.
+    c.selectCatalogImage(99);
+    c.selectCatalogImage(1);
+    QCOMPARE(c.catalogIndex(), 1);
+    QCOMPARE(picked.count(), 1);
+}
+
+void BackendTest::catalogAbsentMeansAccountRequired()
+{
+    qunsetenv(imagecatalog::IMAGES_ENV);
+    // /etc and fisherman's data dirs have no manifest on a test runner.
+    InstallerController c;
+    if (c.hasCatalog())
+        QSKIP("a real images.json is installed; nothing to prove about its absence");
+    QVERIFY(c.needsUserCreation());
+    QCOMPARE(c.catalogIndex(), -1);
+    QVERIFY(c.catalogNames().isEmpty());
+    QVERIFY(c.tourSlides().isEmpty());
+    // Live media keeps the empty image, and the user step then follows the
+    // live manifest's first leaf (see the constructor); here there is none.
+    QVERIFY(c.needsNetwork());
+}
+
+void BackendTest::recipeUserOmittedWhenNotRequired()
+{
+    Recipe withUser;
+    withUser.user.username = QStringLiteral("alex");
+    QVERIFY(withUser.toJson().contains(QStringLiteral("user")));
+
+    Recipe skipped;
+    skipped.user.username = QStringLiteral("alex");
+    skipped.userRequired = false;
+    QVERIFY(!skipped.toJson().contains(QStringLiteral("user")));
+
+    // fromJson still reads a user block when one is present.
+    QCOMPARE(Recipe::fromJson(withUser.toJson()).user.username, QStringLiteral("alex"));
+}
+
+void BackendTest::requirementsGates()
+{
+    const QString dir = QStringLiteral(PROBE_FIXTURES_DIR);
+    if (!QFileInfo::exists(dir + QStringLiteral("/vm.json")))
+        QSKIP("shared/probe/fixtures is absent");
+    qputenv(probe::FAKE_ENV, (dir + QStringLiteral("/vm.json")).toUtf8());
+    InstallerController blocked;
+    qputenv(probe::FAKE_ENV, (dir + QStringLiteral("/laptop.json")).toUtf8());
+    InstallerController clear;
+    qunsetenv(probe::FAKE_ENV);
+
+    // vm.json is unmet on ram, cpu AND uefi: fatal, no continue path.
+    QVERIFY(blocked.requirementsBlocking());
+    QVERIFY(blocked.requirementsFatal());
+    QVERIFY(!blocked.continueAnyway());
+    QSignalSpy changed(&blocked, &InstallerController::continueAnywayChanged);
+    blocked.setContinueAnyway(true);
+    QVERIFY(blocked.continueAnyway());
+    QCOMPARE(changed.count(), 1);
+    blocked.setContinueAnyway(true);
+    QCOMPARE(changed.count(), 1);
+
+    // laptop.json meets everything: no gate at all.
+    QVERIFY(!clear.requirementsBlocking());
+    QVERIFY(!clear.requirementsFatal());
+}
+
+void BackendTest::cancelInstallWithoutAProcessIsANoOp()
+{
+    InstallerController c;
+    // Nothing is running: leaving must be safe and silent, not an error.
+    QVERIFY(!c.installing());
+    c.cancelInstall();
+    QVERIFY(!c.installing());
+}
+
+void BackendTest::copyLogWithoutAClipboardIsANoOp()
+{
+    // QTEST_APPLESS_MAIN runs without a GUI application: there is no
+    // clipboard, and the call must warn and return instead of crashing.
+    InstallerController c;
+    c.copyLogToClipboard();
+}
+
+void BackendTest::regionListsComeFromThePlatform()
+{
+    const QList<region::Language> languages = region::availableLanguages();
+    QVERIFY(!languages.isEmpty());
+    bool hasEnglish = false;
+    for (const region::Language &l : languages) {
+        QVERIFY(!l.id.isEmpty() && !l.display.isEmpty());
+        if (l.id == QStringLiteral("en"))
+            hasEnglish = true;
+    }
+    QVERIFY(hasEnglish);
+
+    const QList<region::Keymap> layouts = region::availableKeyboardLayouts();
+    QVERIFY(!layouts.isEmpty());
+    bool hasUs = false;
+    for (const region::Keymap &k : layouts) {
+        if (k.id == QStringLiteral("us"))
+            hasUs = true;
+    }
+    QVERIFY(hasUs);
+
+    QVERIFY(region::availableTimezones().contains(QStringLiteral("UTC")));
+    QVERIFY(!region::systemTimezone().isEmpty());
+    QCOMPARE(region::systemKeyboardLayout(), QStringLiteral("us"));
+}
+
+void BackendTest::regionTimezoneDisplay()
+{
+    QCOMPARE(region::timezoneDisplay(QStringLiteral("America/New_York")),
+             QStringLiteral("New York (America)"));
+    QCOMPARE(region::timezoneDisplay(QStringLiteral("UTC")), QStringLiteral("UTC"));
+}
+
+void BackendTest::regionRejectsUnreachableHosts()
+{
+    // .invalid never resolves (RFC 2606), so no packet decides the outcome:
+    // asserting on an unroutable IP instead would depend on the runner's
+    // firewall, and a sandbox proxy already answers those here. No success
+    // case is asserted — the CI runner's network is not this test's business.
+    QVERIFY(!region::hostReachable("nonexistent.invalid", 53, 1500));
+}
+
+void BackendTest::tourSlidesFollowTheSelection()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QFile manifest(dir.filePath(QStringLiteral("images.json")));
+    QVERIFY(manifest.open(QIODevice::WriteOnly));
+    manifest.write(catalogFixture());
+    manifest.close();
+    qputenv(imagecatalog::IMAGES_ENV, dir.filePath(QStringLiteral("images.json")).toUtf8());
+    InstallerController c;
+    qunsetenv(imagecatalog::IMAGES_ENV);
+    if (!c.hasCatalog())
+        QSKIP("catalog override did not apply");
+
+    // The default leaf carries the group's carousel.
+    QCOMPARE(c.tourSlides().size(), 1);
+    QCOMPARE(c.tourSlides().first().toMap().value(QStringLiteral("title")).toString(),
+             QStringLiteral("Welcome"));
+    // The red leaf names none: the done screen hides the carousel.
+    c.selectCatalogImage(2);
+    QVERIFY(c.tourSlides().isEmpty());
 }
 
 QTEST_APPLESS_MAIN(BackendTest)

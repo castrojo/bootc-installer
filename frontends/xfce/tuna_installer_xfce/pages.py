@@ -2,13 +2,16 @@
 Flow and recipe contract: ../../INSTALLER-FRONTENDS.md."""
 
 import os
+import threading
 
 import gi
 
 gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GLib, Gtk, Pango
 
-from . import core, fisherman_validate, progress_parser
+from . import core, fisherman_validate, gates, locale as locale_checks
+from . import phone_companion, progress_parser, tour
 from .logo import product_logo
 
 # The recipe's encryption types, in display order: fisherman's
@@ -109,12 +112,16 @@ class WelcomePage(Page):
             "You'll choose what to install and where; nothing is written to "
             "any disk until you confirm on the final step.")
         self.pack_start(body, False, False, 0)
-        # fisherman's minimum requirements (RAM, CPU cores, UEFI). A warning,
-        # not a gate: GNOME blocks, the other frontends warn and continue
-        # (shared/probe/README.md).
-        warning = core.requirements_warning()
-        if warning:
-            self.pack_start(_warn_row(warning), False, False, 0)
+        # A first-run tour of the catalog's image families (tour.py), shown
+        # where a newcomer actually waits. Below-minimum machines never
+        # reach this page: the app shows a blocking RAM/CPU/UEFI gate
+        # instead (gates.py), so there is no warn-inline here anymore.
+        # GNOME blocks the same way; warn-and-continue was this
+        # frontend's alone.
+        _, _, catalog = core.load_catalog()
+        self.tour = tour.TourCarousel()
+        self.pack_start(self.tour, False, False, 0)
+        self.tour.set_slides(tour.slides_from_catalog(catalog))
 
 
 class SourcePage(Page):
@@ -413,6 +420,49 @@ class IdentityPage(Page):
         self.user_frame.add(ug)
         self.pack_start(self.user_frame, False, False, 0)
 
+        # Language and region (locale.py): GNOME's language/keyboard/timezone
+        # steps, folded into this page so the wizard keeps its eight pages.
+        # The keyboard layout applies to the live session as it changes, so
+        # the passphrase typed here is the one the installed system reads;
+        # language and timezone are recorded for the session. None of the
+        # three emits a recipe key fisherman's schema was never shown to
+        # accept (GNOME's processor drops those finals the same way).
+        loc = Gtk.Expander(label="Language and region")
+        locbox = Gtk.Grid(column_spacing=12, row_spacing=6, margin=6)
+        self.lang_combo = Gtk.ComboBoxText()
+        for name in locale_checks.available_languages():
+            self.lang_combo.append(name, name)
+        self._select_combo(self.lang_combo, locale_checks.current_language())
+        self.kb_combo = Gtk.ComboBoxText()
+        for name in locale_checks.available_keyboard_layouts():
+            self.kb_combo.append(name, name)
+        self._select_combo(self.kb_combo, locale_checks.current_keyboard_layout())
+        self.kb_combo.connect("changed", self._on_keyboard_changed)
+        self.tz_combo = Gtk.ComboBoxText()
+        for name in locale_checks.available_timezones():
+            self.tz_combo.append(name, name)
+        self._select_combo(self.tz_combo, locale_checks.current_timezone())
+        for i, (label, combo) in enumerate((("Language", self.lang_combo),
+                                            ("Keyboard", self.kb_combo),
+                                            ("Timezone", self.tz_combo))):
+            locbox.attach(Gtk.Label(label=label, xalign=0), 0, i, 1, 1)
+            locbox.attach(combo, 1, i, 1, 1)
+        loc.add(locbox)
+        self.pack_start(loc, False, False, 0)
+
+        # Phone companion (phone_companion.py): the account form on a phone.
+        # The server runs only while this expander is open and stops after
+        # the first accepted submission; the values land in the entries
+        # above, so fisherman's LiveCheck vets them exactly like typing.
+        self.phone_box = phone_companion.PhoneCompanionBox(
+            core.PRODUCT_NAME, core.BRANDING.default_hostname,
+            self._apply_phone_config)
+        phone_exp = Gtk.Expander(label="Set up from your phone")
+        phone_exp.add(self.phone_box)
+        phone_exp.connect("notify::expanded", self._on_phone_expanded)
+        self.phone_expander = phone_exp
+        self.pack_start(phone_exp, False, False, 0)
+
         # The hostname and username rules are fisherman's
         # (`fisherman validate --json --partial -`). The hostname used to be
         # a single-label pattern here with no length limit, and the username
@@ -435,6 +485,42 @@ class IdentityPage(Page):
         show_problem(self.hostname_problem, self.problems["hostname"])
         show_problem(self.username_problem, self.problems["user.username"])
         self.win.refresh_nav()
+
+    @staticmethod
+    def _select_combo(combo, value):
+        """Select `value`, adding it first when the system reports one the
+        list does not contain (a live session can outrun localectl)."""
+        if value and combo.get_model() is not None:
+            ids = [row[1] for row in combo.get_model()]
+            if value not in ids:
+                combo.append(value, value)
+        combo.set_active_id(value)
+
+    def _on_keyboard_changed(self, combo):
+        layout = combo.get_active_id()
+        if layout:
+            locale_checks.apply_keyboard_layout(layout)
+
+    def _on_phone_expanded(self, expander, _param):
+        if expander.get_expanded():
+            self.phone_box.start()
+        else:
+            self.phone_box.stop()
+
+    def _apply_phone_config(self, config):
+        """A phone submission, applied as if typed: entries first, so the
+        LiveCheck submit below vets them before Next enables."""
+        self.username.set_text(config.get("username", ""))
+        self.fullname.set_text(config.get("fullname", ""))
+        self.password.set_text(config.get("password", ""))
+        self.hostname.set_text(config.get("hostname", ""))
+        self.check.submit(self.partial_recipe())
+
+    def locale_selection(self):
+        """(language, keyboard, timezone): the session's locale choices."""
+        return (self.lang_combo.get_active_id() or "",
+                self.kb_combo.get_active_id() or "",
+                self.tz_combo.get_active_id() or "")
 
     def on_enter(self):
         self.user_frame.set_visible(self.win.needs_user_creation())
@@ -474,6 +560,25 @@ class ConfirmPage(Page):
         self.warn_label = _warn_row(core.BRANDING.text("confirm_warning", disk="the selected disk"))
         self.warn_text = self.warn_label.get_children()[1]
         self.pack_start(self.warn_label, False, False, 0)
+        # Connectivity gate (defaults/conn_check.py): an install that must
+        # download its image cannot start offline. GNOME's conn_check page
+        # auto-skips on offline installs and otherwise blocks with a
+        # Recheck button; this row is that page, folded into confirm so
+        # the wizard keeps its eight pages. net_ok starts True and only a
+        # real window's async check can turn it False, so test stubs (no
+        # check_connectivity) never gate.
+        self.net_ok = True
+        self.net_row = _warn_row("Checking network connection…")
+        self.net_row.set_no_show_all(True)
+        self.pack_start(self.net_row, False, False, 0)
+        netbar = Gtk.Box(spacing=8)
+        netbar.set_halign(Gtk.Align.END)
+        self.net_recheck = Gtk.Button(label="Recheck")
+        self.net_recheck.connect("clicked", lambda *_: self._check_network())
+        self.net_recheck.set_no_show_all(True)
+        netbar.pack_start(self.net_recheck, False, False, 0)
+        self.net_bar = netbar
+        self.pack_start(netbar, False, False, 0)
         for widget, key in ((self.subtitle, "confirm_subtitle"), (self.body, "confirm_body")):
             line = core.BRANDING.text(key)
             widget.set_text(line)
@@ -503,6 +608,58 @@ class ConfirmPage(Page):
             else "confirm_warning"
         )
         self.warn_text.set_text(core.BRANDING.text(warn_key, disk=disk))
+        self._check_network()
+
+    def _check_network(self):
+        """Ask the window whether this install needs the network, and if so
+        probe it off the UI thread (locale.has_connectivity). The window
+        owns the answer because only it sees all pages: live media installs
+        the running system, and an image already in the host's stores needs
+        no download (offline_images). Test doubles have no
+        check_connectivity and keep net_ok True."""
+        check = getattr(self.win, "check_connectivity", None)
+        if check is None:
+            return
+        if core.dry_run():
+            # The screenshot harness drives on_enter with no route out;
+            # probing would stall the capture and paint a "Checking…"
+            # row into the committed screenshot.
+            self._set_net(True, "")
+            return
+        needs, offline = self.win.describe_connectivity()
+        if not needs:
+            self._set_net(True, "")
+            return
+        self._set_net(True, "Checking network connection…")
+        self.win.refresh_nav()
+
+        def probe():
+            ok = locale_checks.has_connectivity()
+            GLib.idle_add(self._on_net_result, ok, offline)
+
+        threading.Thread(target=probe, daemon=True).start()
+
+    def _on_net_result(self, ok, offline):
+        if ok:
+            self._set_net(True, "")
+        else:
+            self._set_net(
+                False,
+                "No network connection. The selected image must be "
+                "downloaded; connect and press Recheck, or go back and "
+                "choose an image marked [available offline].")
+        self.win.refresh_nav()
+        return False
+
+    def _set_net(self, ok, message):
+        self.net_ok = ok
+        if message:
+            self.net_row.get_children()[1].set_text(message)
+        self.net_row.set_visible(bool(message))
+        self.net_recheck.set_visible(not ok)
+
+    def can_continue(self):
+        return self.net_ok
 
 
 class ProgressPage(Page):
@@ -655,15 +812,36 @@ class DonePage(Page):
         # The page's own action row, where the wizard's Back/Next bar sits on
         # every other page (the window hides that bar here): Close, and
         # Restart now -- held while a recovery key is unacknowledged.
+        # Power off opens the poweroff dialog (gates.py, mirroring GNOME's
+        # dialog_poweroff.py); View install log opens the persistent log
+        # with a Copy button (mirroring dialog_output.py) and shows only
+        # on failure, when there is something to diagnose.
         actions = Gtk.Box(spacing=8)
         self.reboot_btn = Gtk.Button(label=core.BRANDING.text("done_restart") or "Restart now")
         self.reboot_btn.get_style_context().add_class("suggested-action")
         self.reboot_btn.connect("clicked", lambda *_: core.host_run(["systemctl", "reboot"]))
+        self.poweroff_btn = Gtk.Button(label="Power off")
+        self.poweroff_btn.connect("clicked", self.__on_poweroff)
+        self.log_btn = Gtk.Button(label="View install log")
+        self.log_btn.connect("clicked", self.__on_view_log)
+        self.log_btn.set_no_show_all(True)
         self.close_btn = Gtk.Button(label="Close")
         self.close_btn.connect("clicked", self.__on_close)
         actions.pack_end(self.reboot_btn, False, False, 0)
+        actions.pack_end(self.poweroff_btn, False, False, 0)
+        actions.pack_end(self.log_btn, False, False, 0)
         actions.pack_end(self.close_btn, False, False, 0)
         self.pack_end(actions, False, False, 0)
+
+    def __on_poweroff(self, *_):
+        dialog = gates.PoweroffDialog(self.get_toplevel())
+        dialog.run()
+        dialog.destroy()
+
+    def __on_view_log(self, *_):
+        dialog = gates.InstallLogDialog(self.get_toplevel())
+        dialog.run()
+        dialog.destroy()
 
     def __on_close(self, *_):
         top = self.get_toplevel()
@@ -713,6 +891,7 @@ class DonePage(Page):
             self.body.set_text(core.BRANDING.text("done_subtitle"))
             self.store_btn.set_visible(bool(core.BRANDING.store_url))
             self.reboot_btn.show()
+            self.log_btn.set_visible(False)
         else:
             self.headline.set_markup("<big><b>" + GLib.markup_escape_text(
                 core.BRANDING.text("done_failed_title")) + "</b></big>")
@@ -720,6 +899,7 @@ class DonePage(Page):
                 "The last lines of the install log:\n\n" + log_tail +
                 "\n\nFull log: " + core.install_log_path())
             self.reboot_btn.hide()
+            self.log_btn.set_visible(True)
 
 
 PAGE_ORDER = ["welcome", "source", "destination", "setup", "identity",

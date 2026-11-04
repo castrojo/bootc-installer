@@ -19,10 +19,13 @@ flatpak-validate:
     done
 
 # GNOME screenshot walkthrough, the way screenshots-gnome.yml runs it.
+# GTK4 has no offscreen backend (unlike Qt's, which is how the KDE capture
+# runs with no display server), so a display is still required: the existing
+# one when set, else Xvfb on a stock runner. tests/gui/capture-screens.py
+# errors out clearly when neither exists.
 capture:
     test -f build/bootc_installer/bootc-installer.gresource || (meson setup build -Dbuild-fisherman=false && ninja -C build)
-    BOOTC_RESOURCE=build/bootc_installer/bootc-installer.gresource \
-      xvfb-run -a -s "-screen 0 1400x1000x24" python3 tests/gui/capture-screens.py docs/screenshots
+    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then BOOTC_RESOURCE=build/bootc_installer/bootc-installer.gresource python3 tests/gui/capture-screens.py docs/screenshots; elif command -v xvfb-run >/dev/null 2>&1; then BOOTC_RESOURCE=build/bootc_installer/bootc-installer.gresource xvfb-run -a -s "-screen 0 1400x1000x24" python3 tests/gui/capture-screens.py docs/screenshots; else echo "just capture: no display server and no xvfb-run; run under Xvfb or with DISPLAY set" >&2; exit 1; fi
 
 # Fold every frontend's committed capture into docs/walkthrough/ (what walkthrough.yml does from CI artifacts).
 walkthrough:

@@ -40,14 +40,17 @@ import parity_report  # noqa: E402
 
 PAGES = [
     ("01-welcome", 0, "What the installer is about to do."),
-    ("02-disk", 1, "Choose the target disk."),
-    ("03-encryption", 2, "Encryption choice."),
-    ("04-account", 3, "The account the install creates."),
-    ("05-confirm", 4, "The last screen before anything is written."),
-    ("06-progress", 5, "The install, with live log."),
-    ("07-done", 6, "Finished."),
-    ("08-recovery", 6, "A TPM install: the recovery key, and restart held "
+    ("02-session", 1, "Live-session keyboard, language, timezone and network."),
+    ("03-source", 2, "What to install: live system or a catalog image."),
+    ("04-disk", 3, "Choose the target disk."),
+    ("05-encryption", 4, "Encryption and filesystem choice."),
+    ("06-account", 5, "The account the install creates."),
+    ("07-confirm", 6, "The last screen before anything is written."),
+    ("08-progress", 7, "The install, with live log."),
+    ("09-done", 8, "Finished."),
+    ("10-recovery", 8, "A TPM install: the recovery key, and restart held "
                        "until it is acknowledged."),
+    ("11-tour", 8, "The selected image's tour slides."),
 ]
 
 # The account page's fields, filled the way a user would leave them: the
@@ -57,8 +60,8 @@ ACCOUNT = {"username": "alex", "fullname": "Alex Example",
            "userPassword": "capture", "userPasswordConfirm": "capture"}
 
 # Pages by role, so the checks below do not hard-code positions twice.
-PROGRESS_PAGE = 5
-DONE_PAGE = 6
+PROGRESS_PAGE = 7
+DONE_PAGE = 8
 
 # fisherman emits this once, after TPM enrolment, and for a tpm2-luks install
 # it is the only way back into the disk if the TPM state changes (#129). No CI
@@ -267,11 +270,49 @@ def main():
     root.setProperty("disksProbed", True)
     root.setProperty("selectedDisk", probed["disks"][0])
     root.setProperty("hasTpm", probed["tpm_usable"])
-    root.setProperty("unmet", probed["unmet"])
+    # The gate photographed on purpose: the fixture meets every requirement,
+    # so the welcome frame would never show the blocking dialog the wizard
+    # now puts up. RAM/CPU keep a "Continue anyway" path; UEFI would not.
+    root.setProperty("unmet", ["ram", "cpu"])
     # The encryption choices the backend's `detect` reports: its embedded
     # copy of fisherman's encryption-choices.json.
     with open(os.path.join(REPO, "installer", "encryption-choices.json"), encoding="utf-8") as fh:
         root.setProperty("encryptionChoices", json.load(fh)["choices"])
+    # The catalog the backend's `catalog` reports, joined here against the
+    # probe's offline images the way the Source step does. Imgrefs match
+    # the fixture's offline_images, so both rows read "available offline".
+    STABLE = {"name": "Example OS Stable", "desc": "The stable release.",
+              "imgref": "ghcr.io/example/os:stable",
+              "filesystem": "btrfs", "filesystems": ["btrfs", "ext4"],
+              "needs_user_creation": True, "bootloader": "systemd",
+              "composefs": False, "flatpaks": ["org.example.App"],
+              "default_hostname": "example", "carousel": []}
+    BETA = {"name": "Example OS Beta", "desc": "The beta release.",
+            "imgref": "ghcr.io/example/os:beta",
+            "filesystem": "ext4", "filesystems": ["ext4"],
+            "needs_user_creation": False, "bootloader": "systemd",
+            "composefs": False, "flatpaks": [],
+            "default_hostname": "",
+            "carousel": [{"title": "Welcome",
+                          "description": "This is the tour.",
+                          "image": ""}]}
+    root.setProperty("catalogLeaves", [STABLE, BETA])
+    root.setProperty("catalogDefaultImage", "ghcr.io/example/os:stable")
+    root.setProperty("offlineImages", probed["offline_images"])
+    root.setProperty("catalogLoaded", True)
+    # Preselected the way `catalog`'s answer preselects: the first leaf.
+    root.setProperty("selectedLeaf", STABLE)
+    # The preflight's answer: lists from the host tools, connectivity up.
+    root.setProperty("keyboardLayouts", ["us", "de"])
+    root.setProperty("keyboardLayout", "us")
+    root.setProperty("localeList", ["en_US.UTF-8", "de_DE.UTF-8"])
+    root.setProperty("localeName", "en_US.UTF-8")
+    root.setProperty("timezoneList", ["UTC", "Europe/Berlin"])
+    root.setProperty("timezoneName", "Europe/Berlin")
+    root.setProperty("netConnected", True)
+    root.setProperty("sessionLoaded", True)
+    # The persistent log `detect` names next to the progress page's copy.
+    root.setProperty("logPath", "/home/user/.local/state/tuna-installer/install.log")
     for prop, value in ACCOUNT.items():
         root.setProperty(prop, value)
     if not root.property("accountReady"):
@@ -281,6 +322,14 @@ def main():
     frames, findings = [], []
     for name, page, _caption in PAGES:
         root.setProperty("currentPage", page)
+        # The tour overlay is independent of the page: open it over the
+        # done screen with the leaf that ships slides selected.
+        if name == "11-tour":
+            root.setProperty("selectedLeaf", BETA)
+            root.setProperty("tourIndex", 0)
+            root.setProperty("tourOpen", True)
+        else:
+            root.setProperty("tourOpen", False)
         if page == PROGRESS_PAGE:
             # Through appendLog(), the function a real install calls — so the
             # bar, the step caption and the log rendering are all the live
@@ -296,7 +345,7 @@ def main():
             settle(700)
         if page == DONE_PAGE:
             root.setProperty("installSuccess", True)
-        if name == "08-recovery":
+        if name == "10-recovery":
             QMetaObject.invokeMethod(root, "appendLog",
                                      Q_ARG(QVariant, RECOVERY_EVENT))
             if not root.property("recoveryKey"):
@@ -321,7 +370,7 @@ def main():
 
         # The account step's purpose is the user block; the confirm screen
         # is where the user checks it before anything is written.
-        if name in ("04-account", "05-confirm") and ACCOUNT["username"] not in finding["text"]:
+        if name in ("06-account", "07-confirm") and ACCOUNT["username"] not in finding["text"]:
             print(f"  !! the username is not on {name}", file=sys.stderr)
             sys.exit(1)
 
@@ -329,7 +378,7 @@ def main():
         # can still be wrong: the panel can draw without the key in it, and
         # Restart can be live before the acknowledgement. Neither shows up in
         # a pixel histogram.
-        if name == "08-recovery":
+        if name == "10-recovery":
             key = root.property("recoveryKey")
             if key not in finding["text"]:
                 print("  !! the recovery key is not in the rendered text — "

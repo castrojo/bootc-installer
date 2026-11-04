@@ -62,6 +62,46 @@ the process exit status or actionable backend output.
 - Expose validation before enabling Next or Install.
 - Keep focus and warning states visible in both light and dark themes.
 
+## GNOME parity notes
+
+The wizard keeps its seven modules; the GNOME steps that have no module here
+are folded into the existing ones rather than added as new steps:
+
+- The **image catalog** (fisherman's `images.json`, resolved like the GNOME
+  and XFCE frontends resolve it) lives on the **disk** step, and the account
+  step is skipped when the selected leaf sets `needs_user_creation: false`
+  (`src/imagecatalog.{h,cpp}`). A leaf without the flag defaults to `true`:
+  an undescribed image installs with an account step rather than with nobody
+  to sign in as. Remote (`http`) per-leaf flatpak lists are deliberately not
+  fetched — leaving `flatpaks` empty keeps fisherman's fallback, the same
+  default a leaf without flatpaks gets everywhere.
+- The **hardware gates** live on the **welcome** step: unmet RAM/CPU hold
+  Next until an explicit override is ticked (the cpu/ram windows), while a
+  non-UEFI boot has no continue path, only power off (the unsupported
+  window). The **power off**, **copy install log** and **cancel install**
+  actions mirror `dialog_poweroff.py`, `dialog_output.py` and the exit
+  handler's `view_progress.terminate()`; quitting mid-install asks first
+  and kills the wrapper, which is the cancel contract (fisherman exits when
+  its parent dies).
+- **Language, keyboard and timezone** live on the **welcome** step and are
+  shown back on the **confirm** screen, where GNOME shows its finals. They
+  are wizard state, never recipe state: fisherman's Recipe struct has no
+  such fields, and `tests/unit/test_shared_recipe_schema.py` pins this
+  frontend's recipe to exactly those fields. The **connectivity check**
+  blocks Next only when the install needs the network (not live media, image
+  not already in the host's offline stores).
+- The **tour** is the selected leaf's `carousel` slides on the **done**
+  screen. Slide titles and descriptions travel; the artwork does not — the
+  manifest names GNOME GResource paths (`resource:///...`), which nothing in
+  this stack can resolve.
+- The **phone companion** (QR + LAN form server) is deliberately not
+  implemented: it is a TLS-terminating network service, a new privileged
+  surface that belongs in a follow-up spec, not in a parity pass. When it
+  lands, render the QR in QML (a small byte-mode encoder over the session
+  URL) rather than adding a `python3-segno` equivalent to the Flatpak
+  manifest — this stack has no Python, and a new runtime dependency for one
+  code is the wrong trade. No manifest change was needed for any of this.
+
 ## Visual verification
 
 The screenshot workflow builds the real QML modules with `tests/capture.cpp`,

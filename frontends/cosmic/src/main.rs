@@ -18,6 +18,11 @@ mod progress;
 mod branding;
 mod ui;
 mod validate;
+mod image_catalog;
+mod hardware;
+mod preflight;
+mod tour;
+mod phone;
 
 use cosmic::app::{Core, Settings, Task};
 use cosmic::iced::{Length, Size};
@@ -76,11 +81,32 @@ pub struct Flags {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    /// Blocking hardware gates (CPU/RAM/unsupported firmware). Shown only
+    /// while a gate stands; GNOME opens a dedicated window instead.
+    Requirements,
     Welcome,
+    /// Image catalog (image.py / XFCE SourcePage). Skipped on live media
+    /// and when the catalog offers fewer than two leaves.
+    Image,
+    /// Locale preflight (language.py).
+    Language,
+    /// Keyboard preflight (keyboard.py).
+    Keyboard,
+    /// Timezone preflight (timezone.py).
+    Timezone,
+    /// Connectivity preflight (network.py / conn_check.py). Skipped on
+    /// live media: an offline install needs no network.
+    Network,
     DiskSelect,
     Options,
     /// Username, full name and password: the recipe's `user` block.
+    /// Conditional: skipped when the selected image (or a custom URL)
+    /// provides its own first user.
     Account,
+    /// Per-image tour carousel (views/tour.py). Skipped without slides.
+    Tour,
+    /// Phone companion form (utils/phone_companion.py).
+    Companion,
     Confirm,
     Installing,
     Done,
@@ -89,11 +115,19 @@ pub enum Page {
 impl Page {
     /// Wizard order. Also the capture order, so a new page cannot be added
     /// without appearing in the walkthrough.
-    pub const ORDER: [Page; 7] = [
+    pub const ORDER: [Page; 15] = [
+        Page::Requirements,
         Page::Welcome,
+        Page::Image,
+        Page::Language,
+        Page::Keyboard,
+        Page::Timezone,
+        Page::Network,
         Page::DiskSelect,
         Page::Options,
         Page::Account,
+        Page::Tour,
+        Page::Companion,
         Page::Confirm,
         Page::Installing,
         Page::Done,
@@ -101,10 +135,18 @@ impl Page {
 
     pub const fn slug(self) -> &'static str {
         match self {
+            Page::Requirements => "requirements",
             Page::Welcome => "welcome",
+            Page::Image => "image",
+            Page::Language => "language",
+            Page::Keyboard => "keyboard",
+            Page::Timezone => "timezone",
+            Page::Network => "network",
             Page::DiskSelect => "disk",
             Page::Options => "options",
             Page::Account => "account",
+            Page::Tour => "tour",
+            Page::Companion => "companion",
             Page::Confirm => "confirm",
             Page::Installing => "installing",
             Page::Done => "done",
@@ -113,10 +155,18 @@ impl Page {
 
     pub const fn title(self) -> &'static str {
         match self {
+            Page::Requirements => "Requirements",
             Page::Welcome => "Welcome",
+            Page::Image => "Choose a system",
+            Page::Language => "Language",
+            Page::Keyboard => "Keyboard",
+            Page::Timezone => "Time zone",
+            Page::Network => "Network",
             Page::DiskSelect => "Select a disk",
             Page::Options => "Options",
             Page::Account => "Account",
+            Page::Tour => "Tour",
+            Page::Companion => "Use your phone",
             Page::Confirm => "Confirm",
             Page::Installing => "Installing",
             Page::Done => "Finished",
@@ -171,10 +221,20 @@ fn is_account_field(field: &str) -> bool {
 
 /// The account page's own rules (fisherman checks only the username's
 /// form): a username and a password, the password typed the same twice.
-/// The account is required: this frontend has no image catalog to say the
-/// image creates its own first user, which is also XFCE's default.
 fn account_complete(username: &str, password: &str, confirm: &str) -> bool {
     !username.is_empty() && !password.is_empty() && password == confirm
+}
+
+/// Whether the account page is required for this install. A custom image
+/// URL never needs one (`get_finals`, custom branch); otherwise the
+/// selected catalog leaf decides (`needs_user_creation`, image.py). With
+/// no catalog or no selection yet there is no image on record to say
+/// otherwise, so the account stays required — the previous behavior.
+fn account_required_for(custom_image: &str, selected_needs_user: Option<bool>) -> bool {
+    if !custom_image.trim().is_empty() {
+        return false;
+    }
+    selected_needs_user.unwrap_or(true)
 }
 
 // -------------------------------------------------------------- messages ----
@@ -207,6 +267,48 @@ pub enum Message {
     /// Put the recovery key on the clipboard.
     CopyRecoveryKey,
     StartInstall,
+    /// The catalog choice (image.py / XFCE SourcePage).
+    SelectImage(usize),
+    /// A custom image URL, typed instead of picked. Non-empty wins over
+    /// the catalog choice and never needs a user (`get_finals`).
+    CustomImageChanged(String),
+    /// "Continue anyway" on one overridable hardware gate (window_cpu /
+    /// window_ram relaunch with IGNORE_CPU / IGNORE_RAM; here the override
+    /// stays in-process, under the same names).
+    OverrideGate(hardware::GateKind),
+    /// Power off the machine (unsupported-firmware gate, poweroff dialog).
+    PowerOff,
+    /// Reboot into the firmware setup (poweroff dialog's firmware row).
+    FirmwareSetup,
+    /// The header's Exit button: confirm first, then quit — killing the
+    /// install's process group on the way out when one is running
+    /// (BootcWindow.__on_exit_clicked / __on_exit_response).
+    RequestQuit,
+    ConfirmQuit,
+    CancelQuit,
+    /// Copy the install log to the clipboard (dialog_output's copy affordance).
+    CopyLog,
+    /// Preflight lists arrived (localectl / timedatectl on the host).
+    LocalesLoaded(Vec<String>),
+    KeymapsLoaded(Vec<String>),
+    TimezonesLoaded(Vec<String>),
+    SelectLocale(usize),
+    SelectKeymap(usize),
+    TimezoneQueryChanged(String),
+    SelectTimezone(usize),
+    /// Connectivity recheck (conn_check's Recheck button).
+    RecheckNetwork,
+    /// The connectivity probe answered.
+    NetworkChecked(bool),
+    /// Companion-page heartbeat: drain accepted phone configs into the
+    /// account fields, and keep polling while the page is shown.
+    CompanionTick,
+    /// Copy the pairing link (the token rides in the URL, so the page
+    /// shows only host:port and the code — as on qr_companion.py).
+    CopyPairingLink,
+    /// Tour carousel steps (views/tour.py): within the slides, then on.
+    TourNext,
+    TourBack,
     /// One line of fisherman's stdout, as it arrives.
     ///
     /// run_fisherman() used to be `.output()`: it waited for the process to
@@ -282,6 +384,39 @@ pub struct TunaInstaller {
     /// `Some` only in capture mode. Its presence is also the hard interlock
     /// that stops the capture harness ever running a real install.
     capture: Option<capture::Capture>,
+    /// Image catalog (image.py / XFCE SourcePage): the default ref, the
+    /// fallback flatpaks and the leaves. Empty when no catalog file was
+    /// found; the wizard then falls back to the branding default image.
+    catalog: image_catalog::Catalog,
+    selected_image: Option<usize>,
+    /// A custom image URL, typed instead of picked. Wins over the leaf.
+    custom_image: String,
+    /// "Continue anyway" overrides for the RAM/CPU gates.
+    hw_overrides: hardware::Overrides,
+    /// The exit-confirm state (RequestQuit): the view renders the confirm
+    /// instead of the current page until this clears.
+    show_exit_dialog: bool,
+    /// Preflight lists and selections (localectl / timedatectl).
+    locales: Vec<String>,
+    selected_locale: Option<usize>,
+    keymaps: Vec<String>,
+    selected_keymap: Option<usize>,
+    timezones: Vec<String>,
+    tz_query: String,
+    selected_timezone: Option<usize>,
+    /// Connectivity state (conn_check): checking, and the last answer.
+    net_checking: bool,
+    net_online: Option<bool>,
+    /// Tour carousel position within [`TunaInstaller::tour_slides`].
+    tour_index: usize,
+    /// Phone companion pairing token and the port its server bound.
+    companion_token: String,
+    companion_port: Option<u16>,
+    /// A phone submitted its form (CompanionTick applied it).
+    companion_applied: bool,
+    /// The install wrapper's pid while it runs, so exiting mid-install can
+    /// signal its process group (shared contract, spawn_wrapper).
+    install_pid: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
 }
 
 impl TunaInstaller {
@@ -386,6 +521,109 @@ impl TunaInstaller {
     pub fn probed(&self) -> bool {
         self.probed
     }
+    pub fn images(&self) -> &[image_catalog::ImageLeaf] {
+        &self.catalog.leaves
+    }
+    pub fn selected_image(&self) -> Option<usize> {
+        self.selected_image
+    }
+    pub fn custom_image(&self) -> &str {
+        &self.custom_image
+    }
+    /// The image Continue would install: the custom URL when one is typed,
+    /// else the selected leaf, else the branding default.
+    pub fn effective_image(&self) -> String {
+        let custom = self.custom_image.trim();
+        if !custom.is_empty() {
+            return custom.to_string();
+        }
+        if let Some(leaf) = self.selected_image.and_then(|i| self.catalog.leaves.get(i)) {
+            return leaf.imgref.clone();
+        }
+        branding::get().default_image.clone()
+    }
+    pub fn hw_overrides(&self) -> hardware::Overrides {
+        self.hw_overrides
+    }
+    /// The gates blocking the wizard right now.
+    pub fn blocking_gates(&self) -> Vec<hardware::GateKind> {
+        hardware::blocking_gates(&self.unmet, &self.hw_overrides)
+    }
+    pub fn show_exit_dialog(&self) -> bool {
+        self.show_exit_dialog
+    }
+    pub fn locales(&self) -> &[String] {
+        &self.locales
+    }
+    pub fn selected_locale(&self) -> Option<usize> {
+        self.selected_locale
+    }
+    pub fn keymaps(&self) -> &[String] {
+        &self.keymaps
+    }
+    pub fn selected_keymap(&self) -> Option<usize> {
+        self.selected_keymap
+    }
+    pub fn timezones(&self) -> &[String] {
+        &self.timezones
+    }
+    pub fn tz_query(&self) -> &str {
+        &self.tz_query
+    }
+    pub fn selected_timezone(&self) -> Option<usize> {
+        self.selected_timezone
+    }
+    pub fn net_checking(&self) -> bool {
+        self.net_checking
+    }
+    pub fn net_online(&self) -> Option<bool> {
+        self.net_online
+    }
+    pub fn tour_index(&self) -> usize {
+        self.tour_index
+    }
+    pub fn companion_token(&self) -> &str {
+        &self.companion_token
+    }
+    pub fn companion_port(&self) -> Option<u16> {
+        self.companion_port
+    }
+    pub fn companion_applied(&self) -> bool {
+        self.companion_applied
+    }
+    /// Whether the account page is required: the catalog's answer for the
+    /// selected image (or custom URL), defaulting to required with no
+    /// image on record.
+    pub fn account_required(&self) -> bool {
+        account_required_for(
+            &self.custom_image,
+            self.selected_image
+                .and_then(|i| self.catalog.leaves.get(i))
+                .map(|l| l.needs_user_creation),
+        )
+    }
+    /// The tour slides: the selected leaf's carousel, or none (and then
+    /// the tour page is skipped).
+    pub fn tour_slides(&self) -> Vec<tour::Slide> {
+        self.selected_image
+            .and_then(|i| self.catalog.leaves.get(i))
+            .map(|l| tour::slides_from_carousel(&l.carousel))
+            .unwrap_or_default()
+    }
+    /// A page earns its place in the walk only when its data does:
+    /// conditional pages are skipped, never blank.
+    pub fn page_visible(&self, page: Page) -> bool {
+        match page {
+            Page::Requirements => {
+                !hardware::blocking_gates(&self.unmet, &self.hw_overrides).is_empty()
+            }
+            Page::Image => self.live_image.is_none() && self.catalog.has_choice(),
+            Page::Network => self.live_image.is_none(),
+            Page::Account => self.account_required(),
+            Page::Tour => !self.tour_slides().is_empty(),
+            _ => true,
+        }
+    }
 
     /// Takes in a probe answer: the disks, TPM, requirements and live media
     /// together.
@@ -428,6 +666,16 @@ impl TunaInstaller {
             .and_then(|i| self.disks.get(i))
             .map(|d| d.path.clone())
             .unwrap_or_default();
+        // GNOME decides the window before showing the wizard
+        // (main.py::do_activate): with a gate standing and the user still
+        // on the first page, the gates come first. Once the user has moved
+        // on, the probe stays out of their way.
+        if !self.capturing()
+            && self.page == Page::Welcome
+            && !hardware::blocking_gates(&self.unmet, &self.hw_overrides).is_empty()
+        {
+            self.page = Page::Requirements;
+        }
     }
 
     /// fisherman's problem with a field of the options page, if it reported
@@ -476,26 +724,110 @@ impl TunaInstaller {
         )
     }
 
-    fn advance(&mut self) -> Option<Page> {
-        let next = match self.page {
-            Page::Welcome => Page::DiskSelect,
-            Page::DiskSelect => Page::Options,
-            Page::Options => Page::Account,
-            Page::Account => Page::Confirm,
-            Page::Confirm | Page::Installing | Page::Done => return None,
-        };
-        self.page = next;
-        Some(next)
+    /// The recipe's image follows the catalog choice: the custom URL when
+    /// one is typed, else the selected leaf, else the branding default.
+    /// Flatpaks follow the same selection (the leaf's list, else the
+    /// catalog fallback — `get_finals`). Called on every selection change
+    /// and at init, so Confirm and the install always see the choice the
+    /// page shows.
+    fn sync_image(&mut self) {
+        if !self.capturing() && self.live_image.is_some() {
+            // Live media installs the running system; no image is written.
+            return;
+        }
+        let custom = self.custom_image.trim().to_string();
+        if !custom.is_empty() {
+            self.recipe.image = custom;
+            self.recipe
+                .flatpaks
+                .clone_from(&self.catalog.fallback_flatpaks);
+            return;
+        }
+        if let Some(leaf) = self
+            .selected_image
+            .and_then(|i| self.catalog.leaves.get(i))
+        {
+            self.recipe.image = leaf.imgref.clone();
+            self.recipe.flatpaks.clone_from(&leaf.flatpaks);
+        }
+    }
+
+    /// Side effects of arriving on a page: connectivity starts checking,
+    /// the companion server starts serving, the tour restarts its slides.
+    fn on_enter_page(&mut self, page: Page) -> Task<Message> {
+        match page {
+            Page::Network => {
+                if self.capturing() || self.live_image.is_some() {
+                    return Task::none();
+                }
+                self.net_checking = true;
+                self.net_online = None;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(preflight::check_connectivity)
+                            .await
+                            .unwrap_or(false)
+                    },
+                    |ok| cosmic::action::app(Message::NetworkChecked(ok)),
+                )
+            }
+            Page::Companion => {
+                if self.capturing() {
+                    return Task::none();
+                }
+                if self.companion_token.is_empty() {
+                    self.companion_token = phone::new_token();
+                }
+                let token = self.companion_token.clone();
+                self.companion_port = Some(phone::ensure_server(&token));
+                Task::perform(
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    },
+                    |_| cosmic::action::app(Message::CompanionTick),
+                )
+            }
+            Page::Tour => {
+                self.tour_index = 0;
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// Leaving the companion page stops its server: the form must not
+    /// outlive the install it feeds.
+    fn on_leave_page(&mut self, page: Page) {
+        if page == Page::Companion {
+            phone::stop_server();
+            self.companion_port = None;
+        }
+    }
+
+    fn advance(&mut self) -> (Option<Page>, Task<Message>) {
+        let from = self.page.index();
+        for i in (from + 1)..Page::ORDER.len() {
+            let candidate = Page::ORDER[i];
+            if self.page_visible(candidate) {
+                self.on_leave_page(self.page);
+                self.page = candidate;
+                let task = self.on_enter_page(candidate);
+                return (Some(candidate), task);
+            }
+        }
+        (None, Task::none())
     }
 
     fn retreat(&mut self) {
-        self.page = match self.page {
-            Page::Confirm => Page::Account,
-            Page::Account => Page::Options,
-            Page::Options => Page::DiskSelect,
-            Page::DiskSelect => Page::Welcome,
-            other => other,
-        };
+        let from = self.page.index();
+        for i in (0..from).rev() {
+            let candidate = Page::ORDER[i];
+            if self.page_visible(candidate) {
+                self.on_leave_page(self.page);
+                self.page = candidate;
+                return;
+            }
+        }
     }
 }
 
@@ -531,6 +863,24 @@ impl cosmic::Application for TunaInstaller {
         // No additional_image_stores: left out, fisherman exposes the offline
         // stores it finds on the host (tuna-os/fisherman#276).
 
+        // The image catalog (image.py / XFCE SourcePage). The default leaf
+        // is selected up front, so a skipped image page still installs the
+        // default instead of the branding fallback. Nothing shells out: it
+        // is flat files, read here.
+        let mut catalog = image_catalog::Catalog::default();
+        let mut selected_image: Option<usize> = None;
+        if !capturing {
+            if let Some(loaded) = image_catalog::load_catalog() {
+                selected_image = loaded
+                    .default_index()
+                    .or((!loaded.leaves.is_empty()).then_some(0));
+                catalog = loaded;
+            }
+        }
+        if let Some(leaf) = selected_image.and_then(|i| catalog.leaves.get(i)) {
+            recipe.image = leaf.imgref.clone();
+            recipe.flatpaks.clone_from(&leaf.flatpaks);
+        }
         let mut app = Self {
             core,
             page: Page::Welcome,
@@ -558,6 +908,25 @@ impl cosmic::Application for TunaInstaller {
             disk_error: None,
             probed: false,
             capture: flags.capture,
+            catalog,
+            selected_image,
+            custom_image: String::new(),
+            hw_overrides: hardware::Overrides::default(),
+            show_exit_dialog: false,
+            locales: Vec::new(),
+            selected_locale: None,
+            keymaps: Vec::new(),
+            selected_keymap: None,
+            timezones: Vec::new(),
+            tz_query: String::new(),
+            selected_timezone: None,
+            net_checking: false,
+            net_online: None,
+            tour_index: 0,
+            companion_token: String::new(),
+            companion_port: None,
+            companion_applied: false,
+            install_pid: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         if capturing {
             // The shared laptop fixture, through the same reader. A capture
@@ -581,6 +950,33 @@ impl cosmic::Application for TunaInstaller {
                 cosmic::action::app(Message::Probed(r))
             }));
             tasks.push(app.check_fields());
+            // Preflight lists (localectl / timedatectl on the host), off
+            // the UI thread. Empty answers are fine: each page renders its
+            // empty state and still advances.
+            tasks.push(Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(preflight::load_locales)
+                        .await
+                        .unwrap_or_default()
+                },
+                |v| cosmic::action::app(Message::LocalesLoaded(v)),
+            ));
+            tasks.push(Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(preflight::load_keymaps)
+                        .await
+                        .unwrap_or_default()
+                },
+                |v| cosmic::action::app(Message::KeymapsLoaded(v)),
+            ));
+            tasks.push(Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(preflight::load_timezones)
+                        .await
+                        .unwrap_or_default()
+                },
+                |v| cosmic::action::app(Message::TimezonesLoaded(v)),
+            ));
         }
         app.set_header_title(window_title);
 
@@ -604,29 +1000,224 @@ impl cosmic::Application for TunaInstaller {
     }
 
     fn header_end(&self) -> Vec<Element<'_, Message>> {
-        vec![widget::progress_bar::determinate_linear(
-            (self.page.index() as f32 + 1.0) / Page::ORDER.len() as f32,
-        )
-        .width(Length::Fixed(120.0))
-        .into()]
+        vec![
+            widget::progress_bar::determinate_linear(
+                (self.page.index() as f32 + 1.0) / Page::ORDER.len() as f32,
+            )
+            .width(Length::Fixed(120.0))
+            .into(),
+            // GNOME's header exit (btn_exit): confirm first, and kill the
+            // install's process group when one is running.
+            widget::button::standard(crate::ui::copy::EXIT_BUTTON)
+                .on_press(Message::RequestQuit)
+                .into(),
+        ]
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::NextPage => {
-                if let Some(Page::DiskSelect) = self.advance() {
-                    if !self.capturing() {
-                        // Again on entering the page, so a disk plugged in
-                        // after start-up appears.
-                        return Task::perform(Self::probe(), |r| {
+                let (next, task) = self.advance();
+                if next == Some(Page::DiskSelect) && !self.capturing() {
+                    // Again on entering the page, so a disk plugged in
+                    // after start-up appears.
+                    return Task::batch(vec![
+                        task,
+                        Task::perform(Self::probe(), |r| {
                             cosmic::action::app(Message::Probed(r))
-                        });
-                    }
+                        }),
+                    ]);
                 }
-                Task::none()
+                task
             }
             Message::BackPage => {
                 self.retreat();
+                Task::none()
+            }
+            Message::SelectImage(idx) => {
+                if idx < self.catalog.leaves.len() {
+                    self.selected_image = Some(idx);
+                    self.sync_image();
+                }
+                Task::none()
+            }
+            Message::CustomImageChanged(s) => {
+                self.custom_image = s;
+                self.sync_image();
+                Task::none()
+            }
+            Message::OverrideGate(kind) => {
+                // Window_cpu / window_ram's "continue anyway", kept under
+                // the same IGNORE_* names the probe contract documents.
+                match kind {
+                    hardware::GateKind::Ram => self.hw_overrides.ram = true,
+                    hardware::GateKind::Cpu => self.hw_overrides.cpu = true,
+                    // Unsupported firmware offers no way forward — only
+                    // power off (window_unsupported has no continue).
+                    hardware::GateKind::Unsupported => {}
+                }
+                if let Some(name) = hardware::override_env(kind) {
+                    tracing::debug!("hardware gate overridden ({name})");
+                }
+                // With the last gate overridden the page stops being
+                // visible, so move on; with gates standing the page stays.
+                if hardware::blocking_gates(&self.unmet, &self.hw_overrides).is_empty() {
+                    let (_, task) = self.advance();
+                    task
+                } else {
+                    Task::none()
+                }
+            }
+            Message::PowerOff => {
+                spawn_host(&hardware::poweroff_command());
+                Task::none()
+            }
+            Message::FirmwareSetup => {
+                spawn_host(&hardware::firmware_setup_command());
+                Task::none()
+            }
+            Message::RequestQuit => {
+                // Mirror __is_done: no confirm once finished.
+                if self.page == Page::Done {
+                    std::process::exit(i32::from(!self.install_ok));
+                }
+                self.show_exit_dialog = true;
+                Task::none()
+            }
+            Message::ConfirmQuit => {
+                self.show_exit_dialog = false;
+                // Terminate fisherman before quitting, as __on_exit_response
+                // does through view_progress.terminate(): the wrapper leads
+                // its own group, so signalling the group reaches the install
+                // and not this process.
+                if self.installing {
+                    let pid = self.install_pid.lock().unwrap().take();
+                    if let Some(pid) = pid {
+                        let _ = hardware::terminate_process_group(pid);
+                    }
+                }
+                std::process::exit(i32::from(!self.install_ok));
+            }
+            Message::CancelQuit => {
+                self.show_exit_dialog = false;
+                Task::none()
+            }
+            Message::CopyLog => {
+                cosmic::iced::clipboard::write(self.install_log.clone())
+            }
+            Message::LocalesLoaded(locales) => {
+                // The session locale first, so the current choice stays
+                // selected instead of resetting to the top of the list.
+                let current = std::env::var("LANG").unwrap_or_default();
+                let ordered = preflight::order_locales(locales, &current);
+                self.selected_locale = (!ordered.is_empty()).then_some(0);
+                self.locales = ordered;
+                Task::none()
+            }
+            Message::KeymapsLoaded(keymaps) => {
+                self.selected_keymap = if keymaps.is_empty() {
+                    None
+                } else {
+                    Some(keymaps.iter().position(|k| k == "us").unwrap_or(0))
+                };
+                self.keymaps = keymaps;
+                Task::none()
+            }
+            Message::TimezonesLoaded(timezones) => {
+                self.timezones = timezones;
+                Task::none()
+            }
+            Message::SelectLocale(idx) => {
+                if idx < self.locales.len() {
+                    self.selected_locale = Some(idx);
+                    let locale = self.locales[idx].clone();
+                    preflight::apply_best_effort(&preflight::apply_locale_command(&locale));
+                }
+                Task::none()
+            }
+            Message::SelectKeymap(idx) => {
+                if idx < self.keymaps.len() {
+                    self.selected_keymap = Some(idx);
+                    let keymap = self.keymaps[idx].clone();
+                    preflight::apply_best_effort(&preflight::apply_keymap_command(&keymap));
+                }
+                Task::none()
+            }
+            Message::TimezoneQueryChanged(q) => {
+                self.tz_query = q;
+                Task::none()
+            }
+            Message::SelectTimezone(idx) => {
+                if idx < self.timezones.len() {
+                    self.selected_timezone = Some(idx);
+                    let zone = self.timezones[idx].clone();
+                    preflight::apply_best_effort(&preflight::apply_timezone_command(&zone));
+                }
+                Task::none()
+            }
+            Message::RecheckNetwork => {
+                let capturing = self.capturing();
+                let is_live = self.live_image.is_some();
+                check_network_task(&mut self.net_checking, &mut self.net_online, capturing, is_live)
+            }
+            Message::NetworkChecked(online) => {
+                self.net_checking = false;
+                self.net_online = Some(online);
+                Task::none()
+            }
+            Message::CompanionTick => {
+                // A phone submitted its form: fill the account entries the
+                // way typing would (sync_user), so validation and Confirm
+                // see exactly what a typed entry would produce.
+                let mut tasks = Vec::new();
+                let mut applied = false;
+                for config in phone::drain_inbox() {
+                    applied = true;
+                    self.username = config.username;
+                    self.fullname = config.fullname;
+                    self.password = config.password.clone();
+                    self.password_confirm = config.password;
+                    if !config.hostname.is_empty() {
+                        self.recipe.hostname = config.hostname;
+                    }
+                    self.sync_user();
+                    tasks.push(self.check_fields());
+                }
+                if applied {
+                    self.companion_applied = true;
+                }
+                // Keep polling while the page is shown.
+                if self.page == Page::Companion && !self.capturing() {
+                    tasks.push(Task::perform(
+                        async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        },
+                        |_| cosmic::action::app(Message::CompanionTick),
+                    ));
+                }
+                Task::batch(tasks)
+            }
+            Message::CopyPairingLink => {
+                let host = phone::local_ip().unwrap_or_default();
+                let port = self.companion_port.unwrap_or(0);
+                let token = self.companion_token.clone();
+                cosmic::iced::clipboard::write(phone::pairing_url(&host, port, &token))
+            }
+            Message::TourNext => {
+                if self.tour_index + 1 < self.tour_slides().len() {
+                    self.tour_index += 1;
+                    Task::none()
+                } else {
+                    let (_, task) = self.advance();
+                    task
+                }
+            }
+            Message::TourBack => {
+                if self.tour_index > 0 {
+                    self.tour_index -= 1;
+                } else {
+                    self.retreat();
+                }
                 Task::none()
             }
             Message::SelectDisk(idx) => {
@@ -738,7 +1329,8 @@ impl cosmic::Application for TunaInstaller {
                 self.installing = true;
                 self.progress.reset();
                 let recipe = self.recipe.clone();
-                Task::stream(Self::stream_fisherman(recipe).map(cosmic::action::app))
+                let pid_slot = self.install_pid.clone();
+                Task::stream(Self::stream_fisherman(recipe, pid_slot).map(cosmic::action::app))
             }
             Message::InstallLine(line) => {
                 // Through the same parser the capture harness drives, so the
@@ -793,6 +1385,11 @@ impl cosmic::Application for TunaInstaller {
         // `flatpak ps` insufficient, by running with no window ever appearing
         // while the smoke check stayed green. Cheap after the first call.
         readiness::stamp_first_frame(APP_ID, self.page.slug());
+        // The exit confirm (dialog_poweroff's sibling in GNOME's main
+        // window) replaces the page until it is answered.
+        if self.show_exit_dialog {
+            return ui::exit_confirm(self);
+        }
         ui::view(self)
     }
 }
@@ -823,7 +1420,10 @@ impl TunaInstaller {
     /// (shared/progress/README.md); stderr is plain text and is interleaved
     /// into the same stream line by line (see `merged_lines`), which the
     /// parser passes through untouched.
-    fn stream_fisherman(recipe: Recipe) -> impl Stream<Item = Message> {
+    fn stream_fisherman(
+        recipe: Recipe,
+        pid_slot: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
+    ) -> impl Stream<Item = Message> {
         cosmic::iced::stream::channel(64, async move |mut output| {
             let json = match serde_json::to_string_pretty(&recipe) {
                 Ok(json) => json,
@@ -838,7 +1438,13 @@ impl TunaInstaller {
             // hold a passphrase (tuna-os/fisherman#276).
             let cmd = offline::fisherman_command();
             let mut child = match spawn_wrapper(&cmd, json.into_bytes()).await {
-                Ok(child) => child,
+                Ok(child) => {
+                    // Published for the exit path: ConfirmQuit signals this
+                    // group, which is what stops the install instead of
+                    // orphaning it.
+                    *pid_slot.lock().unwrap() = child.id();
+                    child
+                }
                 Err(e) => {
                     let _ = output
                         .send(Message::InstallFinished(Err(format!(
@@ -868,12 +1474,49 @@ impl TunaInstaller {
                     return;
                 }
             };
+            // The wrapper is reaped: clear the slot so a later exit no
+            // longer signals a recycled pid.
+            *pid_slot.lock().unwrap() = None;
             if code != 0 {
                 tracing::error!("fisherman exited with code {code}");
             }
             let _ = output.send(Message::InstallFinished(Ok(code))).await;
         })
     }
+}
+
+/// Spawn a host command detached: power off, firmware setup, and the
+/// preflight applies never hold the UI thread.
+fn spawn_host(argv: &[String]) {
+    if let Some((program, args)) = argv.split_first() {
+        if let Err(e) = std::process::Command::new(program).args(args).spawn() {
+            tracing::warn!("host command {argv:?} failed to start: {e}");
+        }
+    }
+}
+
+/// (Re)start the connectivity probe off the UI thread. In capture mode or
+/// on live media there is nothing to check: the page shows its seeded or
+/// skipped state instead.
+fn check_network_task(
+    checking: &mut bool,
+    online: &mut Option<bool>,
+    capturing: bool,
+    is_live: bool,
+) -> Task<Message> {
+    if capturing || is_live {
+        return Task::none();
+    }
+    *checking = true;
+    *online = None;
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(preflight::check_connectivity)
+                .await
+                .unwrap_or(false)
+        },
+        |ok| cosmic::action::app(Message::NetworkChecked(ok)),
+    )
 }
 
 /// Start fisherman's wrapper with piped output, as the leader of its own
@@ -1155,7 +1798,10 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (code, log, fraction) = rt.block_on(async {
             use cosmic::iced::futures::StreamExt;
-            let mut stream = Box::pin(TunaInstaller::stream_fisherman(recipe));
+            let mut stream = Box::pin(TunaInstaller::stream_fisherman(
+                recipe,
+                Default::default(),
+            ));
             let mut progress = super::progress::Progress::new("ExampleOS");
             let mut log = String::new();
             let mut code = None;
@@ -1256,12 +1902,39 @@ mod tests {
     }
 
     #[test]
-    fn the_account_page_follows_options_and_precedes_confirm() {
+    fn wizard_order_matches_gnome_parity() {
         let order = Page::ORDER;
         let at = |p: Page| order.iter().position(|q| *q == p).unwrap();
-        assert_eq!(at(Page::Account), at(Page::Options) + 1);
-        assert_eq!(at(Page::Confirm), at(Page::Account) + 1);
-        assert_eq!(order.len(), 7);
+        // Preflight runs before the disk page; the tour and the companion
+        // run after the account and before the summary.
+        assert!(at(Page::Requirements) < at(Page::Welcome));
+        assert!(at(Page::Welcome) < at(Page::Image));
+        assert!(at(Page::Image) < at(Page::Language));
+        assert!(at(Page::Language) < at(Page::Keyboard));
+        assert!(at(Page::Keyboard) < at(Page::Timezone));
+        assert!(at(Page::Timezone) < at(Page::Network));
+        assert!(at(Page::Network) < at(Page::DiskSelect));
+        assert!(at(Page::DiskSelect) < at(Page::Options));
+        assert!(at(Page::Options) < at(Page::Account));
+        assert!(at(Page::Account) < at(Page::Tour));
+        assert!(at(Page::Tour) < at(Page::Companion));
+        assert!(at(Page::Companion) < at(Page::Confirm));
+        assert!(at(Page::Confirm) < at(Page::Installing));
+        assert!(at(Page::Installing) < at(Page::Done));
+        assert_eq!(order.len(), 15);
+    }
+
+    #[test]
+    fn account_is_required_until_a_catalog_image_says_otherwise() {
+        use super::account_required_for;
+        // No catalog, no selection: required, as before.
+        assert!(account_required_for("", None));
+        assert!(account_required_for("", Some(true)));
+        // The image makes its own first user: skipped.
+        assert!(!account_required_for("", Some(false)));
+        // A custom URL never needs one (get_finals, custom branch).
+        assert!(!account_required_for("ghcr.io/example/custom:latest", None));
+        assert!(!account_required_for("  ghcr.io/example/custom:latest  ", Some(true)));
     }
 
     #[test]

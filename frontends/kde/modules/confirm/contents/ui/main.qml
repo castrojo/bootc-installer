@@ -15,9 +15,12 @@ TunaComponents.SetupModule {
 
     // fisherman's hostname rule (`validate --json --partial`) holds Install
     // while it reports a problem, and so does a missing or rejected account:
-    // without one the installed system has nobody to sign in as.
+    // without one the installed system has nobody to sign in as — unless
+    // the selected image creates its own first user, in which case the
+    // account step was skipped and nothing is required here either.
     nextEnabled: InstallerController.disk.length > 0 && InstallerController.hostnameProblem === ""
-        && InstallerController.username.length > 0 && InstallerController.usernameProblem === ""
+        && (!InstallerController.needsUserCreation
+            || (InstallerController.username.length > 0 && InstallerController.usernameProblem === ""))
 
     contentItem: ScrollView {
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
@@ -104,16 +107,21 @@ TunaComponents.SetupModule {
                 FormCard.FormDelegateSeparator {}
 
                 // The account step's username (and full name, when given);
-                // never the password.
+                // never the password. Hidden when the selected image creates
+                // its own first user: the account step was skipped, and an
+                // empty row would report a choice nobody made.
                 FormCard.FormTextDelegate {
                     objectName: "confirmUsername"
+                    visible: InstallerController.needsUserCreation
                     text: "Username"
                     description: InstallerController.fullname.length > 0
                         ? InstallerController.username + " (" + InstallerController.fullname + ")"
                         : InstallerController.username
                 }
 
-                FormCard.FormDelegateSeparator {}
+                FormCard.FormDelegateSeparator {
+                    visible: InstallerController.needsUserCreation
+                }
 
                 FormCard.FormTextDelegate {
                     text: "Image"
@@ -122,6 +130,29 @@ TunaComponents.SetupModule {
                     description: InstallerController.image.length > 0
                         ? InstallerController.image
                         : "the running live system"
+                }
+
+                FormCard.FormDelegateSeparator {}
+
+                // The welcome step's region & language, as the GNOME confirm
+                // screen shows its language/keyboard/timezone finals back.
+                FormCard.FormTextDelegate {
+                    text: "Language"
+                    description: InstallerController.language
+                }
+
+                FormCard.FormDelegateSeparator {}
+
+                FormCard.FormTextDelegate {
+                    text: "Keyboard"
+                    description: InstallerController.keyboardLayout
+                }
+
+                FormCard.FormDelegateSeparator {}
+
+                FormCard.FormTextDelegate {
+                    text: "Time zone"
+                    description: InstallerController.timezoneDisplay(InstallerController.timezone)
                 }
             }
             Label {

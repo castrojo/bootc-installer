@@ -15,4 +15,8 @@ sources = [
   'fisherman_validate.py',
 ]
 
+# The encryption-choices copy fisherman_validate.load_choices() reads beside
+# its module: installed alongside, the same arrangement the XFCE frontend
+# ships (frontends/xfce meson data), so the Flatpak and the source tree agree.
 install_data(sources, install_dir: coredir)
+install_data('encryption-choices.json', install_dir: coredir)

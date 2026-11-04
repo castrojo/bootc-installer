@@ -105,6 +105,7 @@ def frontend_code(frontend):
 CHOICES = REPO / "shared" / "recipe" / "encryption-choices.json"
 CHOICES_UPSTREAM = REPO / "fisherman" / "data" / "encryption-choices.json"
 CHOICES_COPIES = {
+    "gnome": REPO / "bootc_installer" / "core" / "encryption-choices.json",
     "kde": REPO / "frontends" / "kde" / "encryption-choices.json",
     "cosmic": REPO / "frontends" / "cosmic" / "src" / "encryption-choices.json",
     "niri": REPO / "frontends" / "niri" / "installer" / "encryption-choices.json",

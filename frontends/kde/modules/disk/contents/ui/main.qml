@@ -16,7 +16,12 @@ TunaComponents.SetupModule {
     id: root
 
     // No disk, no install: Recipe::validationError() rejects an empty disk.
+    // With a catalog on screen an image must be chosen too, the way the
+    // GNOME step holds its Next until a leaf is checked. Live media hides
+    // the catalog (the running system is installed), so nothing is required.
     nextEnabled: InstallerController.disk.length > 0
+        && (!InstallerController.hasCatalog || InstallerController.isLive
+            || InstallerController.catalogIndex >= 0)
 
     // Called by the wizard whenever this step becomes current, so hotplugged
     // media show up. Re-runs `fisherman probe --json`: the disks, their
@@ -71,6 +76,78 @@ TunaComponents.SetupModule {
                 Layout.maximumWidth: root.cardWidth
                 Layout.alignment: Qt.AlignHCenter
                 Layout.bottomMargin: Kirigami.Units.largeSpacing
+            }
+
+            // The image catalog (fisherman's images.json): which OS to
+            // install, and the per-image choices that follow from it — the
+            // account step, bootloader, tour. Hidden on live media, where
+            // the running system is installed, and when no manifest is
+            // installed. The GNOME step groups leaves in expanders; here the
+            // group path is part of each row's title, so a flat searchable
+            // list carries the same information.
+            Label {
+                visible: InstallerController.hasCatalog && !InstallerController.isLive
+                text: "Choose what to install."
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
+
+                Layout.fillWidth: true
+                Layout.maximumWidth: root.cardWidth
+                Layout.alignment: Qt.AlignHCenter
+                Layout.bottomMargin: Kirigami.Units.smallSpacing
+            }
+
+            TextField {
+                id: catalogSearch
+                visible: InstallerController.hasCatalog && !InstallerController.isLive
+                objectName: "catalogSearch"
+                placeholderText: "Search images"
+
+                Layout.fillWidth: true
+                Layout.maximumWidth: root.cardWidth
+                Layout.alignment: Qt.AlignHCenter
+            }
+
+            FormCard.FormCard {
+                visible: InstallerController.hasCatalog && !InstallerController.isLive
+                maximumWidth: root.cardWidth
+
+                Layout.alignment: Qt.AlignHCenter
+                Layout.bottomMargin: Kirigami.Units.largeSpacing
+
+                ButtonGroup {
+                    id: catalogGroup
+                }
+
+                Repeater {
+                    model: InstallerController.catalogNames
+
+                    delegate: FormCard.FormRadioDelegate {
+                        required property int index
+                        required property string modelData
+
+                        readonly property string imgref: InstallerController.catalogImgrefs[index]
+                        readonly property string desc: InstallerController.catalogDescs[index]
+                        readonly property string query: catalogSearch.text.trim().toLowerCase()
+
+                        // Group path, description and ref are all searchable,
+                        // the way the GNOME step matches its search string.
+                        visible: query.length === 0
+                            || modelData.toLowerCase().indexOf(query) >= 0
+                            || imgref.toLowerCase().indexOf(query) >= 0
+                            || desc.toLowerCase().indexOf(query) >= 0
+
+                        ButtonGroup.group: catalogGroup
+
+                        text: modelData
+                        description: desc.length > 0 ? desc + "\n" + imgref : imgref
+                        checked: InstallerController.catalogIndex === index
+
+                        onToggled: if (checked) {
+                            InstallerController.selectCatalogImage(index);
+                        }
+                    }
+                }
             }
 
             FormCard.FormCard {

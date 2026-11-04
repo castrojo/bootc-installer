@@ -1,11 +1,12 @@
 // The account the installed system gets: the recipe's `user` block.
 //
-// This frontend wrote no `user` at all, so an image that does not create its
-// own first user (needs_user_creation) installed with nobody to sign in as
-// (docs/PARITY.md, user account). There is no image catalog here to say an
-// image creates one itself, so the account is required, as it is on XFCE
-// without a catalog. fisherman owns the username rule (`validate --json
-// --partial`); the password confirmation is the only rule of this page.
+// An image that does not create its own first user (needs_user_creation)
+// installs with nobody to sign in as (docs/PARITY.md, user account), so the
+// account is required then, as it is on XFCE without a catalog. When the
+// selected catalog image does create one, the wizard skips this step and
+// the recipe omits the block. fisherman owns the username rule
+// (`validate --json --partial`); the password confirmation is the only rule
+// of this page.
 //
 // SPDX-License-Identifier: GPL-3.0-only
 
@@ -28,11 +29,16 @@ TunaComponents.SetupModule {
 
     // A username and a password, typed the same twice, and no problem from
     // fisherman with the username. Without the user block fisherman creates
-    // no account, and the installed system has nobody to sign in as.
-    nextEnabled: InstallerController.username.length > 0
-        && InstallerController.usernameProblem === ""
-        && passwordField.text.length > 0
-        && passwordsMatch
+    // no account, and the installed system has nobody to sign in as — unless
+    // the selected image creates its own first user (needs_user_creation),
+    // in which case the wizard skips this step and nothing is required.
+    // The step stays reachable (the harness walks every step), so the fields
+    // stay, and Next is free.
+    nextEnabled: !InstallerController.needsUserCreation
+        || (InstallerController.username.length > 0
+            && InstallerController.usernameProblem === ""
+            && passwordField.text.length > 0
+            && passwordsMatch)
 
     contentItem: ScrollView {
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
@@ -41,6 +47,17 @@ TunaComponents.SetupModule {
         ColumnLayout {
             anchors.fill: parent
             spacing: Kirigami.Units.smallSpacing
+
+            Kirigami.InlineMessage {
+                type: Kirigami.MessageType.Information
+                visible: !InstallerController.needsUserCreation
+                text: "The selected image creates its own user account, so this step is optional."
+
+                Layout.fillWidth: true
+                Layout.maximumWidth: root.cardWidth
+                Layout.alignment: Qt.AlignHCenter
+                Layout.bottomMargin: Kirigami.Units.largeSpacing
+            }
 
             Label {
                 text: "Create the account you will sign in with. It can also administer this computer."
